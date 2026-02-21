@@ -2,7 +2,7 @@
   "name": "agentsync",
   "displayName": "AgentSync",
   "description": "Multi-agent coordination protocol for VS Code. Sync Claude, Codex, and Copilot on any project.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "nickhilster",
   "repository": {
     "type": "git",
@@ -26,6 +26,14 @@
       {
         "command": "agentsync.openTracker",
         "title": "AgentSync: Open AgentTracker"
+      },
+      {
+        "command": "agentsync.startSession",
+        "title": "AgentSync: Start Session"
+      },
+      {
+        "command": "agentsync.endSession",
+        "title": "AgentSync: End Session"
       }
     ]
   }

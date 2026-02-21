@@ -1,14 +1,12 @@
 # AgentSync
 
-**Multi-agent coordination protocol for VS Code.**
+Multi-agent coordination protocol for VS Code.
 
-AgentSync lets Claude, Codex, and GitHub Copilot work on the same codebase without stepping on each other. It installs a shared handoff document (`AgentTracker.md`) and the per-agent instruction files each tool reads natively — so every agent starts oriented, and leaves notes for the next one.
-
----
+AgentSync helps Claude, Codex, and GitHub Copilot work in the same repository without stepping on each other. It installs shared handoff docs and adds workflow commands that keep status current.
 
 ## How it works
 
-Each AI agent reads a different file for workspace context:
+Each agent reads a different workspace instruction file:
 
 | Agent | File |
 | --- | --- |
@@ -16,92 +14,127 @@ Each AI agent reads a different file for workspace context:
 | OpenAI Codex | `AGENTS.md` |
 | GitHub Copilot | `.github/copilot-instructions.md` |
 
-All three files contain the same protocol: read `AgentTracker.md` first, work cleanly, update the tracker before finishing.
+All instructions point to `AgentTracker.md`, the shared handoff file.
 
-`AgentTracker.md` is the live handoff doc — it records who last worked on the repo, which files are hot, what's in progress, and what to do next.
+`AgentTracker.md` tracks:
 
----
+- Last session metadata (agent/date/summary/branch/commit)
+- Current health (build/test/deploy)
+- Hot files touched recently
+- Active work in progress
+- Suggested next work and known gotchas
 
 ## Install
 
-**From the VS Code marketplace** *(coming soon)*:
-Search for `AgentSync` in the Extensions panel.
+From the VS Code Marketplace (coming soon): search for `AgentSync`.
 
-**From a `.vsix` file**:
+From a `.vsix`:
 
 1. Download the latest `.vsix` from [Releases](https://github.com/nickhilster/agentsync/releases)
-2. In VS Code: `Extensions` → `...` → `Install from VSIX`
-
----
+2. In VS Code, open `Extensions` -> `...` -> `Install from VSIX`
 
 ## Usage
 
-### 1. Initialize any workspace
+## 1. Initialize a workspace
 
-Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run:
+Run from Command Palette:
 
-```
+```text
 AgentSync: Initialize Workspace
 ```
 
-This creates four files in your project root:
+This creates:
 
-```
+```text
 CLAUDE.md
 AGENTS.md
 .github/copilot-instructions.md
 AgentTracker.md
+.agentsync.json
 ```
 
-`AgentTracker.md` opens automatically so you can fill in the project context.
+## 2. Start and end sessions
 
-### 2. Status bar
+At the beginning of work:
 
-The AgentSync status bar item (bottom-left) shows the last agent who updated the tracker:
-
-```
-⟳ Claude
+```text
+AgentSync: Start Session
 ```
 
-Click it to open `AgentTracker.md`.
+This appends an item to **In Progress** with agent, timestamp, and goal.
 
-### 3. Open the tracker anytime
+At the end of work:
 
+```text
+AgentSync: End Session
 ```
-AgentSync: Open AgentTracker
+
+This updates:
+
+- **Last Session** (agent/date/summary/branch/commit)
+- **Current Health** (configured checks)
+- **Hot Files** (from git changes)
+- **In Progress** (cleans completed entry)
+- **Suggested Next Work** (optional note)
+
+## 3. Status bar
+
+The status bar item shows the current workspace's latest session agent.
+
+It also warns when:
+
+- tracker data is stale (older than configured threshold)
+- tracker branch differs from current branch
+- tracker commit is not in current HEAD history
+
+Click the status item to open `AgentTracker.md`.
+
+## 4. Multi-root behavior
+
+In multi-root workspaces, AgentSync targets the active editor's workspace folder and labels status with the folder name.
+
+## Optional configuration
+
+AgentSync reads optional config from `.agentsync.json` in the repo root.
+
+Example:
+
+```json
+{
+  "staleAfterHours": 24,
+  "commands": {
+    "build": "npm run build",
+    "test": "npm test",
+    "deploy": "npm run deploy"
+  }
+}
 ```
 
----
+If commands are empty or missing, that health check is marked `Not configured`.
 
-## AgentTracker.md reference
+## AgentTracker reference
 
 Update these sections at the end of every session:
 
 | Section | What to write |
 | --- | --- |
-| **Last Session** | Your agent name, date, one-line summary, commit hash |
-| **Current Health** | Build / tests / deploy status |
-| **Hot Files** | Files you touched (other agents should coordinate before editing) |
-| **In Progress** | Active work — clear when complete |
-| **Suggested Next Work** | Notes for the next agent |
-| **Known Issues & Gotchas** | Bugs, environment quirks, deployment gotchas |
-| **Conventions** | Patterns and rules discovered during work |
-
----
+| Last Session | Agent name, date, summary, branch, commit |
+| Current Health | Build/test/deploy status |
+| Hot Files | Files touched recently |
+| In Progress | Active work (clear when complete) |
+| Suggested Next Work | Notes for the next agent |
+| Known Issues & Gotchas | Bugs, environment quirks, deployment gotchas |
+| Conventions | Project patterns and rules discovered during work |
 
 ## Recommended workflow
 
+```text
+1. Agent: Start Session
+2. Agent: Implement work on a branch
+3. Agent: Run checks
+4. Agent: End Session
+5. Human: Review and merge
 ```
-1. Claude:  Plan + spec work
-2. Codex:   Feature implementation on a branch
-3. Claude:  Review, tests, accessibility pass
-4. Human:   Merge
-5. Claude:  Confirm deploy, update AgentTracker
-```
-
-Each agent reads AgentTracker at the start of their turn and updates it at the end. No manual relay required.
-
----
 
 ## License
 

@@ -1,0 +1,8 @@
+{
+  "staleAfterHours": 24,
+  "commands": {
+    "build": "",
+    "test": "",
+    "deploy": ""
+  }
+}

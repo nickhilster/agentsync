@@ -5,18 +5,19 @@
 
 ## Last Session
 
-- **Agent:** —
-- **Date:** —
-- **Summary:** —
-- **Commit:** —
+- **Agent:** -
+- **Date:** -
+- **Summary:** -
+- **Branch:** -
+- **Commit:** -
 
 ## Current Health
 
 | Check  | Status |
 | ------ | ------ |
-| Build  | —      |
-| Tests  | —      |
-| Deploy | —      |
+| Build  | - |
+| Tests  | - |
+| Deploy | - |
 
 ## Hot Files
 

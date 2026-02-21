@@ -1,24 +1,25 @@
 # AgentSync Protocol
 
-This workspace uses the **AgentSync** multi-agent coordination protocol. It enables Claude, Codex,
-GitHub Copilot, and other AI agents to work on the same codebase without stepping on each other.
+This workspace uses the AgentSync multi-agent coordination protocol.
+It enables Claude, Codex, GitHub Copilot, and other AI agents to coordinate through shared handoff state.
 
-## At the start of each Copilot chat session
+## At the start of each Copilot session
 
-1. **Read `AgentTracker.md`** — understand what the last agent did and which files are currently hot
-2. Reference the **Conventions** section when generating code — follow established patterns
-3. Reference the **Known Issues & Gotchas** section before suggesting changes in those areas
+1. Read `AgentTracker.md` for current state and hot files.
+2. Use **Conventions** and **Known Issues & Gotchas** as constraints for suggestions.
+3. If substantial work is about to start, ask the user to run `AgentSync: Start Session`.
 
 ## When suggesting code
 
-- Follow conventions documented in AgentTracker — don't introduce new patterns that contradict them
-- If editing a file listed in **Hot Files**, mention that it was recently changed by another agent
-- Prefer smaller, targeted suggestions over large rewrites in hot files
+- Follow conventions documented in `AgentTracker.md`.
+- If editing a file listed in **Hot Files**, mention cross-agent collision risk.
+- Prefer focused suggestions instead of broad rewrites in active areas.
 
-## When ending a Copilot chat session
+## At the end of significant work
 
-After applying significant changes, update `AgentTracker.md`:
+Ask the user to run `AgentSync: End Session` so the tracker is updated with:
 
-- **Last Session**: "Copilot", today's date, brief summary
-- **Hot Files**: add any files you substantially modified
-- **Conventions**: note any new patterns you introduced or discovered
+- Last Session metadata (Agent, Date, Summary, Branch, Commit)
+- Current Health checks
+- Hot Files from git changes
+- In Progress cleanup and Suggested Next Work
