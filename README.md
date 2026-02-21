@@ -26,7 +26,7 @@ All instructions point to `AgentTracker.md`, the shared handoff file.
 
 ## Install
 
-From the VS Code Marketplace (coming soon): search for `AgentSync`.
+From the VS Code Marketplace: search for **AgentSync** or install from the [Marketplace page](https://marketplace.visualstudio.com/items?itemName=Teambotics.agentsync).
 
 From a `.vsix`:
 
