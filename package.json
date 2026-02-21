@@ -1,0 +1,32 @@
+{
+  "name": "agentsync",
+  "displayName": "AgentSync",
+  "description": "Multi-agent coordination protocol for VS Code. Sync Claude, Codex, and Copilot on any project.",
+  "version": "0.1.0",
+  "publisher": "nickhilster",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nickhilster/agentsync.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["ai", "agents", "claude", "codex", "copilot", "coordination", "handoff"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "files": ["extension.js", "templates/", "README.md", "LICENSE"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentsync.init",
+        "title": "AgentSync: Initialize Workspace"
+      },
+      {
+        "command": "agentsync.openTracker",
+        "title": "AgentSync: Open AgentTracker"
+      }
+    ]
+  }
+}
