@@ -16,7 +16,6 @@
   "keywords": ["ai", "agents", "claude", "codex", "copilot", "coordination", "handoff"],
   "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
-  "files": ["extension.js", "templates/", "README.md", "LICENSE"],
   "contributes": {
     "commands": [
       {
