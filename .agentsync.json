@@ -1,7 +1,5 @@
 {
   "staleAfterHours": 24,
-  "autoStaleSessionMinutes": 0,
-  "requireHandoffOnEndSession": false,
   "commands": {
     "build": "",
     "test": "",

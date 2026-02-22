@@ -2,7 +2,7 @@
   "name": "agentsync",
   "displayName": "AgentSync",
   "description": "Multi-agent coordination protocol for VS Code. Sync Claude, Codex, and Copilot on any project.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "Teambotics",
   "icon": "logo_icon/icon.png",
   "repository": {
@@ -25,6 +25,11 @@
   "keywords": ["ai", "agents", "claude", "codex", "copilot", "coordination", "handoff"],
   "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
+  "scripts": {
+    "vsix:package": "npx --yes @vscode/vsce package --out agentsync-local.vsix",
+    "vsix:install": "node scripts/refresh-vsix.js --skip-package",
+    "vsix:refresh": "node scripts/refresh-vsix.js"
+  },
   "contributes": {
     "commands": [
       {
@@ -33,16 +38,133 @@
       },
       {
         "command": "agentsync.openTracker",
-        "title": "AgentSync: Open AgentTracker"
+        "title": "AgentSync: Open AgentTracker",
+        "icon": "$(book)"
+      },
+      {
+        "command": "agentsync.openPanel",
+        "title": "AgentSync: Open Panel",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "agentsync.openDashboard",
+        "title": "AgentSync: Open Live Dashboard",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "agentsync.openHandoffs",
+        "title": "AgentSync: Open Handoffs JSON",
+        "icon": "$(json)"
+      },
+      {
+        "command": "agentsync.clearActiveSession",
+        "title": "AgentSync: Clear Active Session",
+        "icon": "$(circle-slash)"
       },
       {
         "command": "agentsync.startSession",
-        "title": "AgentSync: Start Session"
+        "title": "AgentSync: Start Session",
+        "icon": "$(play)"
       },
       {
         "command": "agentsync.endSession",
-        "title": "AgentSync: End Session"
+        "title": "AgentSync: End Session",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "agentsync.detectCommands",
+        "title": "AgentSync: Detect Build/Test Commands"
+      },
+      {
+        "command": "agentsync.refreshPanel",
+        "title": "AgentSync: Refresh",
+        "icon": "$(refresh)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentsync",
+          "title": "AgentSync",
+          "icon": "logo_icon/agentsync-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentsync": [
+        {
+          "type": "webview",
+          "id": "agentsync.dashboard",
+          "name": "AgentSync Live",
+          "contextualTitle": "AgentSync Live"
+        },
+        {
+          "id": "agentsync.panel",
+          "name": "AgentSync Details",
+          "contextualTitle": "AgentSync Details"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentsync.startSession",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentsync.endSession",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentsync.clearActiveSession",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentsync.openTracker",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@4"
+        },
+        {
+          "command": "agentsync.openHandoffs",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@5"
+        },
+        {
+          "command": "agentsync.refreshPanel",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@6"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AgentSync",
+      "properties": {
+        "agentsync.promptOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when VS Code opens and an AgentSync session is already active."
+        },
+        "agentsync.sessionReminderHours": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "Show a reminder notification after a session has been active for this many hours. Set to 0 to disable."
+        },
+        "agentsync.autoDetectCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "During workspace initialization, automatically detect npm scripts and offer to populate .agentsync.json commands."
+        },
+        "agentsync.autoStaleSessionMinutes": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Treat active sessions older than this many minutes as stale (UI shows Waiting instead of Busy). Set to 0 to disable."
+        }
+      }
+    }
   }
 }

@@ -33,6 +33,28 @@ From a `.vsix`:
 1. Download the latest `.vsix` from [Releases](https://github.com/nickhilster/agentsync/releases)
 2. In VS Code, open `Extensions` -> `...` -> `Install from VSIX`
 
+## Local one-command refresh (no Marketplace publish)
+
+Use this during development to package and reinstall the extension locally:
+
+```text
+npm run vsix:refresh
+```
+
+Related commands:
+
+```text
+npm run vsix:package   # package only -> agentsync-local.vsix
+npm run vsix:install   # install existing agentsync-local.vsix
+```
+
+If VS Code CLI is not on PATH, set `CODE_CLI` before running (Windows example):
+
+```powershell
+$env:CODE_CLI="C:\Users\<you>\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd"
+npm run vsix:refresh
+```
+
 ## Usage
 
 ## 1. Initialize a workspace
@@ -89,7 +111,21 @@ It also warns when:
 
 Click the status item to open `AgentTracker.md`.
 
-## 4. Multi-root behavior
+## 4. Live dashboard
+
+Run:
+
+```text
+AgentSync: Open Live Dashboard
+```
+
+The **AgentSync Live** view includes:
+- a live operational state (`Ready`, `Busy`, `Waiting`)
+- quick action buttons (Initialize, Start/End Session, open tracker/handoffs)
+- handoff buckets (`Assigned to me`, `Shared with me`, `Blocked/Stale`)
+- animated matrix-style background for at-a-glance activity feedback
+
+## 5. Multi-root behavior
 
 In multi-root workspaces, AgentSync targets the active editor's workspace folder and labels status with the folder name.
 
@@ -102,6 +138,7 @@ Example:
 ```json
 {
   "staleAfterHours": 24,
+  "autoStaleSessionMinutes": 0,
   "commands": {
     "build": "npm run build",
     "test": "npm test",
@@ -111,6 +148,10 @@ Example:
 ```
 
 If commands are empty or missing, that health check is marked `Not configured`.
+
+`autoStaleSessionMinutes` controls stale busy-state behavior:
+- `0` = disabled (default)
+- `>0` = if an active session is older than this threshold, UI shows `Waiting` instead of `Busy`
 
 ## AgentTracker reference
 

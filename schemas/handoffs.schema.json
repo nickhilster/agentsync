@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentSync Handoffs Schema",
+  "description": "Schema for .agentsync/handoffs.json — machine-readable handoff records.",
+  "type": "object",
+  "required": ["version", "handoffs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "handoffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["handoff_id", "task_id", "from_agent", "to_agents", "owner_mode", "status", "created_at"],
+        "additionalProperties": false,
+        "properties": {
+          "handoff_id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "from_agent": { "type": "string", "pattern": "^[a-z0-9_\-]+$", "description": "canonical agent id (lowercase)" },
+          "to_agents": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_\-]+$" }, "minItems": 0 },
+          "owner_mode": { "type": "string", "enum": ["single", "shared", "auto"] },
+          "status": { "type": "string", "enum": ["queued", "in_progress", "blocked", "ready_for_review", "approved", "merged", "escalated"] },
+          "required_capabilities": { "type": "array", "items": { "type": "string" } },
+          "summary": { "type": "string" },
+          "notes": { "type": ["string", "null"] },
+          "no_handoff_reason": { "type": ["string", "null"] },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "branch": { "type": ["string", "null"] },
+          "commit": { "type": ["string", "null"] },
+          "prior_attempts": { "type": "integer", "minimum": 0, "default": 0 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": ["string", "null"], "format": "date-time" },
+          "state_history": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["status", "agent", "timestamp"],
+              "additionalProperties": false,
+              "properties": {
+                "status": { "type": "string", "enum": ["queued", "in_progress", "blocked", "ready_for_review", "approved", "merged", "escalated"] },
+                "agent": { "type": "string", "pattern": "^[a-z0-9_\-]+$" },
+                "timestamp": { "type": "string", "format": "date-time" },
+                "reason": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

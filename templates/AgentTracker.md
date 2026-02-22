@@ -35,6 +35,12 @@
 
 <!-- Leave notes for the next agent here. -->
 
+## Agent Handoffs
+
+<!-- Machine-readable handoffs are in .agentsync/handoffs.json. This section is auto-rendered by AgentSync. -->
+
+No open handoffs.
+
 ## Known Issues & Gotchas
 
 <!-- Recurring bugs, environment quirks, deployment notes, things that surprised you. -->
