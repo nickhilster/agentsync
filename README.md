@@ -122,6 +122,9 @@ AgentSync: Open Live Dashboard
 The **AgentSync Live** view includes:
 - a live operational state (`Ready`, `Busy`, `Waiting`)
 - quick action buttons (Initialize, Start/End Session, open tracker/handoffs)
+- an **Action Center** that shows running/completed command feedback in real time
+- a built-in 3-step onboarding checklist (`Initialize -> Start -> End`)
+- failure recovery shortcuts (`Open Tracker`, `Refresh`) surfaced directly in the dashboard
 - handoff buckets (`Assigned to me`, `Shared with me`, `Blocked/Stale`)
 - animated matrix-style background for at-a-glance activity feedback
 

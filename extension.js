@@ -1297,6 +1297,24 @@ function getDashboardModel(workspaceFolder) {
     autoStaleSessionMinutes
   )
   const warnings = trackerContent ? getTrackerWarnings(workspaceFolder, tracker) : []
+  const getSuggestedNextStep = () => {
+    if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.'
+    if (state?.sessionActive) return 'Use "End Session" when you are done, or "Clear Active Session" if stale.'
+    if (inProgressLines.length > 0) return 'Review in-progress items, then start a new session to continue.'
+    if (handoffBuckets.open.length > 0) return 'Open Handoffs JSON and pick the highest-priority open handoff.'
+    return 'Ready to start. Use "Start Session" before making changes.'
+  }
+  const onboarding = {
+    initialized: Boolean(trackerContent),
+    started:
+      Boolean(state?.sessionActive) ||
+      Boolean(state?.activeSession?.startedAt) ||
+      Boolean(state?.lastSession?.startedAt),
+    ended:
+      !state?.sessionActive &&
+      (Boolean(state?.lastSession?.endedAt) ||
+        (!isEmptyValue(tracker.date) && !isEmptyValue(tracker.summary)))
+  }
 
   const toStatus = (entry) => {
     const value = entry?.status ?? entry ?? 'Not configured'
@@ -1321,6 +1339,9 @@ function getDashboardModel(workspaceFolder) {
       reason: opsState.reason,
       pulse: getStatePulseFrame(opsState.key)
     },
+    refreshedAt: new Date().toISOString(),
+    nextStep: getSuggestedNextStep(),
+    onboarding,
     session: {
       active: Boolean(state?.sessionActive),
       agent: state?.activeSession?.agent || 'None',
@@ -1438,6 +1459,10 @@ function getDashboardHtml() {
       gap: 7px;
       margin-bottom: 10px;
     }
+    .actions.busy button.action {
+      opacity: 0.65;
+      cursor: wait;
+    }
     button.action {
       border: 1px solid var(--line);
       background: rgba(11, 29, 18, 0.82);
@@ -1505,6 +1530,54 @@ function getDashboardHtml() {
     .status-pass { border-color: #29ca72; color: #8df2b7; }
     .status-fail { border-color: #ff6c74; color: #ffb2b6; }
     .status-unknown { border-color: #888; color: #c9c9c9; }
+    .action-center {
+      margin-bottom: 10px;
+    }
+    .action-live {
+      border-left: 3px solid #49cc83;
+      padding-left: 8px;
+      margin-bottom: 7px;
+    }
+    .action-live.running { border-left-color: #ffb347; }
+    .action-live.error { border-left-color: #ff6c74; }
+    .action-title {
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
+    .checklist {
+      margin: 8px 0 0 0;
+      padding-left: 0;
+      list-style: none;
+    }
+    .checklist li {
+      margin: 4px 0;
+      color: var(--muted);
+    }
+    .checklist li.done {
+      color: #8df2b7;
+    }
+    .recovery {
+      margin-top: 8px;
+      display: none;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .recovery.visible {
+      display: flex;
+    }
+    button.recovery-action {
+      border: 1px solid var(--line);
+      background: rgba(11, 29, 18, 0.82);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 5px 8px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.recovery-action:hover {
+      border-color: #6adf9a;
+      background: rgba(15, 40, 24, 0.9);
+    }
   </style>
 </head>
 <body data-state="ready">
@@ -1527,6 +1600,24 @@ function getDashboardHtml() {
       <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
       <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
     </div>
+
+    <section class="card action-center">
+      <h3>Action Center</h3>
+      <div id="actionLive" class="action-live">
+        <div id="actionTitle" class="action-title">Idle</div>
+        <div id="actionDetail">Choose an action to begin.</div>
+      </div>
+      <div id="recoveryActions" class="recovery">
+        <button class="recovery-action" data-command="agentsync.openTracker">Open Tracker</button>
+        <button class="recovery-action" data-command="agentsync.refreshPanel">Refresh</button>
+      </div>
+      <dl class="kv">
+        <dt>Next step</dt><dd id="nextStep">-</dd>
+        <dt>Last update</dt><dd id="actionUpdated">-</dd>
+        <dt>Data refreshed</dt><dd id="dataRefreshed">-</dd>
+      </dl>
+      <ul id="onboardingList" class="checklist"></ul>
+    </section>
 
     <div class="grid">
       <section class="card">
@@ -1584,6 +1675,18 @@ function getDashboardHtml() {
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    let pendingCommand = null;
+    let lastActionAt = null;
+
+    const commandLabels = {
+      'agentsync.init': 'Initialize Workspace',
+      'agentsync.startSession': 'Start Session',
+      'agentsync.endSession': 'End Session',
+      'agentsync.clearActiveSession': 'Clear Active Session',
+      'agentsync.openTracker': 'Open AgentTracker',
+      'agentsync.openHandoffs': 'Open Handoffs JSON',
+      'agentsync.refreshPanel': 'Refresh'
+    };
 
     function byId(id) {
       return document.getElementById(id);
@@ -1592,6 +1695,50 @@ function getDashboardHtml() {
     function setText(id, value) {
       const el = byId(id);
       if (el) el.textContent = value == null ? '-' : String(value);
+    }
+
+    function formatTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return date.toLocaleTimeString();
+    }
+
+    function setActionVisual(state, title, detail) {
+      const live = byId('actionLive');
+      if (live) {
+        live.classList.remove('running', 'error');
+        if (state === 'running') live.classList.add('running');
+        if (state === 'error') live.classList.add('error');
+      }
+      setText('actionTitle', title);
+      setText('actionDetail', detail);
+      setText('actionUpdated', formatTime(lastActionAt));
+    }
+
+    function setRecoveryVisible(isVisible) {
+      const el = byId('recoveryActions');
+      if (!el) return;
+      el.classList.toggle('visible', Boolean(isVisible));
+    }
+
+    function setActionsBusy(isBusy) {
+      const container = document.querySelector('.actions');
+      if (!container) return;
+      container.classList.toggle('busy', isBusy);
+      const buttons = container.querySelectorAll('button.action');
+      buttons.forEach((button) => {
+        const command = button.getAttribute('data-command');
+        const keepEnabled = command === 'agentsync.refreshPanel';
+        button.disabled = isBusy && !keepEnabled;
+      });
+
+      const recoveryButtons = document.querySelectorAll('button.recovery-action');
+      recoveryButtons.forEach((button) => {
+        const command = button.getAttribute('data-command');
+        const keepEnabled = command === 'agentsync.refreshPanel';
+        button.disabled = isBusy && !keepEnabled;
+      });
     }
 
     function renderList(id, items, format, emptyLabel) {
@@ -1643,9 +1790,60 @@ function getDashboardHtml() {
       return item.id + ' | ' + item.summary + ' (' + item.status + ', ' + item.mode + ')';
     }
 
+    function renderOnboarding(onboarding) {
+      const el = byId('onboardingList');
+      if (!el) return;
+      const stepRows = [
+        {
+          done: Boolean(onboarding && onboarding.initialized),
+          label: '1. Initialize workspace'
+        },
+        {
+          done: Boolean(onboarding && onboarding.started),
+          label: '2. Start first session'
+        },
+        {
+          done: Boolean(onboarding && onboarding.ended),
+          label: '3. End session and hand off'
+        }
+      ];
+      el.innerHTML = '';
+      stepRows.forEach((row) => {
+        const li = document.createElement('li');
+        li.className = row.done ? 'done' : '';
+        li.textContent = (row.done ? '[x] ' : '[ ] ') + row.label;
+        el.appendChild(li);
+      });
+    }
+
+    function getRunningHint(command, label) {
+      if (command === 'agentsync.startSession') {
+        return 'You may see prompts for agent name and goal. Fill those in, then wait for completion.';
+      }
+      if (command === 'agentsync.endSession') {
+        return 'You may see prompts for summary and next work. Complete them, then wait for confirmation.';
+      }
+      if (command === 'agentsync.init') {
+        return 'AgentSync files are being created now. You will see completion once file writes finish.';
+      }
+      return 'Watch for prompts in VS Code. This view will update when complete.';
+    }
+
+    function getFailureHint(command, message) {
+      const base = message || 'The command failed.';
+      if (command === 'agentsync.startSession' || command === 'agentsync.endSession') {
+        return base + ' Open Tracker to review required fields, then try again.';
+      }
+      if (command === 'agentsync.init') {
+        return base + ' Check workspace permissions and try Initialize Workspace again.';
+      }
+      return base + ' Try Refresh. If it persists, open AgentTracker for context.';
+    }
+
     function render(model) {
       if (!model || !model.hasWorkspace) {
         setText('stateText', 'No workspace open');
+        setText('nextStep', 'Open a folder/workspace to use AgentSync.');
         return;
       }
 
@@ -1662,11 +1860,14 @@ function getDashboardHtml() {
       setText('stateReason', model.state.reason);
       setText('openHandoffs', model.handoffs.openCount);
       setText('inProgressCount', model.inProgress.length);
+      setText('nextStep', model.nextStep || '-');
+      setText('dataRefreshed', formatTime(model.refreshedAt));
 
       setText('sessionActive', model.session.active ? 'Yes' : 'No');
       setText('sessionAgent', model.session.agent);
       setText('sessionGoal', model.session.goal);
       setText('sessionStarted', model.session.startedAt ? new Date(model.session.startedAt).toLocaleString() : '-');
+      renderOnboarding(model.onboarding || {});
 
       setText('lastAgent', model.tracker.lastAgent);
       setText('lastDate', model.tracker.lastDate);
@@ -1678,11 +1879,50 @@ function getDashboardHtml() {
       renderList('handoffShared', model.handoffs.sharedWithMe, formatHandoff, 'No shared assignments');
       renderList('handoffBlocked', model.handoffs.blockedOrStale, formatHandoff, 'No blocked/stale handoffs');
       renderList('warningsList', model.warnings, (w) => w, 'No warnings');
+
+      if (!pendingCommand) {
+        const statusLabel = model.state && model.state.label ? model.state.label : 'Idle';
+        setActionVisual('ok', 'Idle', 'Current state: ' + statusLabel + '.');
+        setRecoveryVisible(false);
+      }
     }
 
     window.addEventListener('message', (event) => {
       const msg = event.data || {};
       if (msg.type === 'model') render(msg.model);
+      if (msg.type === 'action') {
+        const stage = String(msg.stage || '');
+        const command = String(msg.command || '');
+        const label = commandLabels[command] || command || 'Action';
+        lastActionAt = msg.timestamp || new Date().toISOString();
+
+        if (stage === 'started') {
+          pendingCommand = command;
+          setActionsBusy(true);
+          setActionVisual(
+            'running',
+            'Running: ' + label,
+            getRunningHint(command, label)
+          );
+          setRecoveryVisible(false);
+          return;
+        }
+
+        if (stage === 'completed') {
+          pendingCommand = null;
+          setActionsBusy(false);
+          setActionVisual('ok', 'Completed: ' + label, 'Action finished successfully.');
+          setRecoveryVisible(false);
+          return;
+        }
+
+        if (stage === 'failed') {
+          pendingCommand = null;
+          setActionsBusy(false);
+          setActionVisual('error', 'Failed: ' + label, getFailureHint(command, msg.error || ''));
+          setRecoveryVisible(true);
+        }
+      }
     });
 
     document.addEventListener('click', (event) => {
@@ -1690,6 +1930,7 @@ function getDashboardHtml() {
       if (!target) return;
       const command = target.getAttribute('data-command');
       if (!command) return;
+      if (pendingCommand && command !== 'agentsync.refreshPanel') return;
       vscode.postMessage({ command });
     });
 
@@ -1743,6 +1984,17 @@ class AgentSyncDashboardViewProvider {
     this.view = null
   }
 
+  postAction(stage, command, error = null) {
+    if (!this.view) return
+    this.view.webview.postMessage({
+      type: 'action',
+      stage,
+      command,
+      error,
+      timestamp: new Date().toISOString()
+    })
+  }
+
   refresh() {
     if (!this.view) return
     const workspaceFolder = getActiveWorkspaceFolder()
@@ -1765,12 +2017,19 @@ class AgentSyncDashboardViewProvider {
       const command = String(message?.command || '')
       if (!command) return
       if (command === 'agentsync.refreshPanel') {
+        this.postAction('started', command)
         this.refresh()
+        this.postAction('completed', command)
         return
       }
+      this.postAction('started', command)
       try {
         await vscode.commands.executeCommand(command)
-      } catch {}
+        this.postAction('completed', command)
+      } catch (err) {
+        const msg = err && err.message ? err.message : 'Unknown error'
+        this.postAction('failed', command, msg)
+      }
       this.refresh()
     })
 
