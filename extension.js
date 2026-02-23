@@ -728,6 +728,32 @@ async function openAgentSyncPanel() {
 }
 
 /**
+ * Open the AgentSync walkthrough in VS Code's Getting Started experience.
+ * Returns false if VS Code cannot resolve walkthrough commands.
+ * @param {vscode.ExtensionContext} context
+ * @returns {Promise<boolean>}
+ */
+async function openAgentSyncTutorial(context) {
+  const manifest = context?.extension?.packageJSON || {}
+  const publisher = String(manifest.publisher || 'teambotics')
+  const name = String(manifest.name || 'agentsync')
+  const extensionId = `${publisher}.${name}`.toLowerCase()
+  const walkthroughId = `${extensionId}#agentsync.gettingStarted`
+
+  try {
+    await vscode.commands.executeCommand('workbench.action.openWalkthrough', walkthroughId, false)
+    return true
+  } catch {}
+
+  try {
+    await vscode.commands.executeCommand('workbench.action.openWalkthroughs')
+    return true
+  } catch {}
+
+  return false
+}
+
+/**
  * Ensure tracker exists, optionally offering initialization.
  * @param {vscode.ExtensionContext} context
  * @param {vscode.WorkspaceFolder} workspaceFolder
@@ -1598,6 +1624,7 @@ function getDashboardHtml() {
       <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
       <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
       <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+      <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
       <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
     </div>
 
@@ -1685,6 +1712,7 @@ function getDashboardHtml() {
       'agentsync.clearActiveSession': 'Clear Active Session',
       'agentsync.openTracker': 'Open AgentTracker',
       'agentsync.openHandoffs': 'Open Handoffs JSON',
+      'agentsync.openTutorial': 'Open Interactive Tutorial',
       'agentsync.refreshPanel': 'Refresh'
     };
 
@@ -2213,7 +2241,8 @@ class AgentSyncTreeDataProvider {
         action('End Session', 'agentsync.endSession', 'debug-stop', 'Write handoff and health metadata'),
         action('Clear Active Session', 'agentsync.clearActiveSession', 'circle-slash', 'Clear stale busy state'),
         action('Open AgentTracker', 'agentsync.openTracker', 'book', 'Open shared handoff document'),
-        action('Open Handoffs JSON', 'agentsync.openHandoffs', 'json', 'Open machine-readable handoff data')
+        action('Open Handoffs JSON', 'agentsync.openHandoffs', 'json', 'Open machine-readable handoff data'),
+        action('Open Interactive Tutorial', 'agentsync.openTutorial', 'mortar-board', 'Open guided onboarding in Getting Started')
       ]
     })
   }
@@ -2605,7 +2634,8 @@ async function initWorkspace(context, selectedFolder = null) {
 
   const choice = await vscode.window.showInformationMessage(
     `AgentSync: Workspace "${workspaceFolder.name}" initialized. ${summary}`,
-    'Open AgentSync Panel'
+    'Open AgentSync Panel',
+    'Open Interactive Tutorial'
   )
 
   if (choice === 'Open AgentSync Panel') {
@@ -2613,6 +2643,13 @@ async function initWorkspace(context, selectedFolder = null) {
     if (!opened) {
       vscode.window.showWarningMessage(
         'AgentSync: Could not focus the panel. Run "View: Reset View Locations" and try again.'
+      )
+    }
+  } else if (choice === 'Open Interactive Tutorial') {
+    const opened = await openAgentSyncTutorial(context)
+    if (!opened) {
+      vscode.window.showWarningMessage(
+        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
       )
     }
   }
@@ -3190,6 +3227,14 @@ function activate(context) {
       )
     }
   })
+  const openTutorialCmd = vscode.commands.registerCommand('agentsync.openTutorial', async () => {
+    const opened = await openAgentSyncTutorial(context)
+    if (!opened) {
+      vscode.window.showWarningMessage(
+        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
+      )
+    }
+  })
   const openHandoffsCmd = vscode.commands.registerCommand('agentsync.openHandoffs', () => openHandoffs())
   const clearActiveSessionCmd = vscode.commands.registerCommand(
     'agentsync.clearActiveSession',
@@ -3235,6 +3280,7 @@ function activate(context) {
     openCmd,
     openDashboardCmd,
     openPanelCmd,
+    openTutorialCmd,
     openHandoffsCmd,
     clearActiveSessionCmd,
     startCmd,

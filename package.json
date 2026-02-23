@@ -2,7 +2,7 @@
   "name": "agentsync",
   "displayName": "AgentSync",
   "description": "Multi-agent coordination protocol for VS Code. Sync Claude, Codex, and Copilot on any project.",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "publisher": "Teambotics",
   "icon": "logo_icon/icon.png",
   "repository": {
@@ -79,6 +79,11 @@
         "command": "agentsync.refreshPanel",
         "title": "AgentSync: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "agentsync.openTutorial",
+        "title": "AgentSync: Open Interactive Tutorial",
+        "icon": "$(mortar-board)"
       }
     ],
     "viewsContainers": {
@@ -136,9 +141,47 @@
           "command": "agentsync.refreshPanel",
           "when": "view == agentsync.panel || view == agentsync.dashboard",
           "group": "navigation@6"
+        },
+        {
+          "command": "agentsync.openTutorial",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@7"
         }
       ]
     },
+    "walkthroughs": [
+      {
+        "id": "agentsync.gettingStarted",
+        "title": "AgentSync Interactive Tutorial",
+        "description": "A guided setup for new users to initialize AgentSync, run a session, and close it with clear handoff context.",
+        "steps": [
+          {
+            "id": "agentsync.tutorial.openDashboard",
+            "title": "Open AgentSync Live",
+            "description": "Open the live dashboard with [AgentSync: Open Live Dashboard](command:agentsync.openDashboard).",
+            "completionEvents": ["onCommand:agentsync.openDashboard"]
+          },
+          {
+            "id": "agentsync.tutorial.initialize",
+            "title": "Initialize your workspace",
+            "description": "Create the coordination files with [AgentSync: Initialize Workspace](command:agentsync.init).",
+            "completionEvents": ["onCommand:agentsync.init"]
+          },
+          {
+            "id": "agentsync.tutorial.startSession",
+            "title": "Start a session",
+            "description": "Begin active work with [AgentSync: Start Session](command:agentsync.startSession).",
+            "completionEvents": ["onCommand:agentsync.startSession"]
+          },
+          {
+            "id": "agentsync.tutorial.endSession",
+            "title": "End and hand off",
+            "description": "Finish with [AgentSync: End Session](command:agentsync.endSession) to update health, hot files, and next work.",
+            "completionEvents": ["onCommand:agentsync.endSession"]
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "AgentSync",
       "properties": {

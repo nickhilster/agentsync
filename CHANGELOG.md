@@ -2,6 +2,20 @@
 
 All notable changes to AgentSync are documented here.
 
+## [0.3.2] - 2026-02-23
+
+### Added
+
+- **Interactive tutorial walkthrough** - added a native VS Code Getting Started walkthrough for first-time AgentSync setup (`Open Live Dashboard`, `Initialize Workspace`, `Start Session`, `End Session`).
+- **Open tutorial command** - new `AgentSync: Open Interactive Tutorial` command in Command Palette, dashboard actions, panel quick actions, and view title actions.
+- **Post-init tutorial launch** - workspace initialization prompt now offers to open the interactive tutorial immediately.
+
+## [0.3.1] - 2026-02-22
+
+### Fixed
+
+- Marketplace republish: version bump to `0.3.1` so a new VSIX can be uploaded.
+
 ## [0.3.0] - 2026-02-21
 
 ### Added
