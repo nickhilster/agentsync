@@ -1,7 +1,45 @@
 {
+  "_readme": {
+    "staleAfterHours": "Mark tracker data stale after this many hours (shows warning in panel). 0 = never stale.",
+    "autoStaleSessionMinutes": "Treat an active session as stale (show Waiting instead of Busy) after this many minutes. 0 = disabled.",
+    "requireHandoffOnEndSession": "When true, End Session forces a handoff note when hot files are detected.",
+    "automation.endSessionZeroTouch.enabled": "Feature flag for mostly zero-touch End Session automation. Off by default for rollout safety.",
+    "automation.endSessionZeroTouch.autonomy": "Automation profile label. Current supported value: mostly_full_auto.",
+    "automation.endSessionZeroTouch.copyPromptToClipboard": "When true, generated handoff prompt lines are offered for clipboard copy in interactive End Session.",
+    "automation.endSessionZeroTouch.maxSummaryLength": "Maximum deterministic summary length before truncation.",
+    "automation.handoffRoutingDefaults": "Default routing map keyed by source agent id (claude/codex/copilot). Used to auto-draft handoffs.",
+    "commands.build": "Shell command to run as the build health check on End Session (for example, 'npm run build'). No shell operators (&&, |) - use a script file instead.",
+    "commands.test": "Shell command to run as the test health check on End Session (for example, 'npm test').",
+    "commands.deploy": "Shell command to run as the deploy health check on End Session (for example, 'npm run deploy'). Leave empty to skip."
+  },
   "staleAfterHours": 24,
   "autoStaleSessionMinutes": 0,
   "requireHandoffOnEndSession": false,
+  "automation": {
+    "endSessionZeroTouch": {
+      "enabled": false,
+      "autonomy": "mostly_full_auto",
+      "copyPromptToClipboard": true,
+      "maxSummaryLength": 180
+    },
+    "handoffRoutingDefaults": {
+      "claude": {
+        "owner_mode": "single",
+        "to_agents": ["codex"],
+        "required_capabilities": []
+      },
+      "codex": {
+        "owner_mode": "single",
+        "to_agents": ["claude"],
+        "required_capabilities": []
+      },
+      "copilot": {
+        "owner_mode": "single",
+        "to_agents": ["codex"],
+        "required_capabilities": []
+      }
+    }
+  },
   "commands": {
     "build": "",
     "test": "",

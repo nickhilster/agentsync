@@ -16,14 +16,18 @@
         "properties": {
           "handoff_id": { "type": "string" },
           "task_id": { "type": "string" },
-          "from_agent": { "type": "string", "pattern": "^[a-z0-9_\-]+$", "description": "canonical agent id (lowercase)" },
-          "to_agents": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_\-]+$" }, "minItems": 0 },
+          "from_agent": { "type": "string", "pattern": "^[a-z0-9_\\-]+$", "description": "canonical agent id (lowercase)" },
+          "to_agents": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" }, "minItems": 0 },
           "owner_mode": { "type": "string", "enum": ["single", "shared", "auto"] },
           "status": { "type": "string", "enum": ["queued", "in_progress", "blocked", "ready_for_review", "approved", "merged", "escalated"] },
           "required_capabilities": { "type": "array", "items": { "type": "string" } },
           "summary": { "type": "string" },
           "notes": { "type": ["string", "null"] },
           "no_handoff_reason": { "type": ["string", "null"] },
+          "generated_prompt_lines": { "type": "array", "items": { "type": "string" } },
+          "prompt_copied_to_clipboard": { "type": "boolean" },
+          "summary_source": { "type": "string", "enum": ["user", "deterministic"] },
+          "automation_context": { "type": ["string", "null"] },
           "files": { "type": "array", "items": { "type": "string" } },
           "branch": { "type": ["string", "null"] },
           "commit": { "type": ["string", "null"] },
@@ -38,7 +42,7 @@
               "additionalProperties": false,
               "properties": {
                 "status": { "type": "string", "enum": ["queued", "in_progress", "blocked", "ready_for_review", "approved", "merged", "escalated"] },
-                "agent": { "type": "string", "pattern": "^[a-z0-9_\-]+$" },
+                "agent": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" },
                 "timestamp": { "type": "string", "format": "date-time" },
                 "reason": { "type": ["string", "null"] }
               }

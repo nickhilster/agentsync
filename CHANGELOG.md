@@ -2,6 +2,17 @@
 
 All notable changes to AgentSync are documented here.
 
+## [0.3.3] - 2026-02-24
+
+### Added
+
+- **Feature-flagged zero-touch End Session automation** - added `automation.endSessionZeroTouch` and `automation.handoffRoutingDefaults`, deterministic summary generation, auto-routed handoff drafting, generated one-line handoff prompts, clipboard copy support in interactive mode, and prompt metadata persisted to state/handoff files.
+
+### Changed
+
+- **Drop-zone endSession response enrichment** - `.agentsync/request.json` `endSession` responses now include `generatedSummary`, `summarySource`, `handoffPrompts`, and `promptCopiedToClipboard` (`false` in headless mode).
+- **Status bar routing + compact-first dashboard docs** - README and changelog text now match runtime behavior for AgentSync Live panel routing and compact-first workflow.
+
 ## [0.3.2] - 2026-02-23
 
 ### Added
@@ -9,6 +20,27 @@ All notable changes to AgentSync are documented here.
 - **Interactive tutorial walkthrough** - added a native VS Code Getting Started walkthrough for first-time AgentSync setup (`Open Live Dashboard`, `Initialize Workspace`, `Start Session`, `End Session`).
 - **Open tutorial command** - new `AgentSync: Open Interactive Tutorial` command in Command Palette, dashboard actions, panel quick actions, and view title actions.
 - **Post-init tutorial launch** - workspace initialization prompt now offers to open the interactive tutorial immediately.
+- **Compact-first AgentSync Live** - dashboard now defaults to compact mode with smaller buttons, focused task memory, and a `More` tray for secondary actions.
+- **Remembered dashboard mode + process colors** - `Show Full`/`Show Compact` mode is persisted per workspace and active commands now highlight buttons with process-specific colors while running.
+- **Status bar routing to live panel** - clicking the AgentSync status bar item now opens AgentSync Live instead of `AgentTracker.md`.
+
+### Security & Reliability
+
+- **Command injection fix (C1)** - health check commands in `.agentsync.json` are now tokenised and passed directly to the OS without invoking a shell (`shell: true` removed). Shell operators (`&&`, `|`, `;`) are not interpreted.
+- **Non-blocking health checks (M1/C1)** - `runCheckCommand` is now async (`cp.spawn`) with a 60-second timeout so the VS Code extension host is never blocked during End Session.
+- **Atomic file writes (C3)** - `AgentTracker.md`, `handoffs.json`, and `state.json` are now written via write-then-rename so a crash mid-write cannot corrupt existing data.
+- **Drop-zone race condition fix (C2/H1)** - `request.json` is atomically renamed to `request.json.processing` before reading, and an in-flight Set prevents concurrent handlers from processing the same request twice.
+- **State divergence ordering (C4)** - tracker is now written before `state.json` so a failed state write leaves the UI showing "Busy" (recoverable) rather than falsely "Ready".
+- **Skip-handoff validation (H5)** - `no_handoff_reason` skip records now go through the same non-empty validation as full handoff records before being persisted.
+- **Regex injection fix (H2)** - tracker field labels passed to `parseTracker()` are now escaped via `escapeRegExp()` before being used in a `RegExp` constructor.
+- **`created_at` required in handoffs (M3)** - `validateHandoff()` now enforces the `created_at` ISO timestamp required by the handoff schema.
+- **ISO date parsing (M5)** - replaced bare `Date.parse()` with a strict ISO 8601 validator (`parseISODate()`) in stale-session checks and startup prompts.
+- **`staleAfterHours: 0` honoured (M2)** - setting `staleAfterHours` to `0` in `.agentsync.json` now correctly disables the staleness check (previously silently defaulted to 24 hours).
+- **Unhandled promise rejections fixed (H3)** - `executeCommand` calls in the startup check and the session reminder timer now have `.catch()` handlers.
+- **Silent catch blocks improved (M4)** - `ENOENT` is still silently ignored where expected; other unexpected I/O errors are logged to the extension console instead of being swallowed.
+- **`.vscodeignore` tightened (T1)** - `.git/`, `.github/`, `.claude/`, `docs/`, `scripts/`, and `schemas/` are now excluded from the VSIX, reducing package size.
+- **EM_DASH constant (T2)** - `'—'` replaced with a named `EM_DASH` constant in `isEmptyValue`.
+- **`.agentsync.json` template documented (T5)** - template now ships with a `_readme` key explaining every field inline.
 
 ## [0.3.1] - 2026-02-22
 

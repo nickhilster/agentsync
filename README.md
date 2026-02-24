@@ -50,7 +50,11 @@ AgentSync: Open Live Dashboard
 The **AgentSync Live** view includes:
 
 - live operational state (`Ready`, `Busy`, `Waiting`)
-- quick action buttons (Initialize, Start/End Session, open tracker/handoffs)
+- compact mode by default with a lightweight memory summary (active goal + top in-progress tasks)
+- compact core actions (`Start Session`, `End Session`, `Clear Active Session`, `Open AgentTracker`) with `More` for secondary actions
+- header toggle (`Show Full` / `Show Compact`) with mode preference remembered per workspace
+- active command highlighting with process-specific button colors while actions are running
+- full dashboard mode with quick action buttons (Initialize, Start/End Session, open tracker/handoffs)
 - **Action Center** with running/completed/failed command feedback
 - built-in onboarding checklist (`Initialize -> Start -> End`)
 - failure recovery shortcuts (`Open Tracker`, `Refresh`)
@@ -111,6 +115,14 @@ AgentSync: End Session
 - **In Progress** (cleans completed entry)
 - **Suggested Next Work** (optional note)
 
+With `automation.endSessionZeroTouch.enabled: true`, End Session switches to mostly zero-touch behavior:
+
+- active-session agent is reused automatically when available
+- one-line summary is deterministically generated, then shown once for confirm/edit
+- hot-file handoffs are auto-routed from routing defaults when possible
+- if routing confidence is missing, one compact fallback prompt is used (`single`, `shared`, `auto`, or `skip`)
+- one-line handoff prompts are generated, stored in `.agentsync/handoffs.json`/`.agentsync/state.json`, and can be copied to clipboard in interactive mode
+
 ### 3. Status bar feedback
 
 The status bar item shows the latest session agent and warns when:
@@ -119,7 +131,7 @@ The status bar item shows the latest session agent and warns when:
 - tracker branch differs from current branch
 - tracker commit is not in current HEAD history
 
-Clicking the status item opens `AgentTracker.md`.
+Clicking the status item opens AgentSync Live.
 
 ### 4. Multi-root behavior
 
@@ -133,6 +145,20 @@ AgentSync reads optional config from `.agentsync.json`:
 {
   "staleAfterHours": 24,
   "autoStaleSessionMinutes": 0,
+  "requireHandoffOnEndSession": false,
+  "automation": {
+    "endSessionZeroTouch": {
+      "enabled": false,
+      "autonomy": "mostly_full_auto",
+      "copyPromptToClipboard": true,
+      "maxSummaryLength": 180
+    },
+    "handoffRoutingDefaults": {
+      "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] },
+      "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": [] },
+      "copilot": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] }
+    }
+  },
   "commands": {
     "build": "npm run build",
     "test": "npm test",
@@ -147,6 +173,13 @@ If commands are empty or missing, that check is marked `Not configured`.
 
 - `0` disables stale-session detection (default)
 - `>0` shows `Waiting` instead of `Busy` when active session age exceeds threshold
+
+`automation.endSessionZeroTouch`:
+
+- starts disabled by default (feature-flag rollout)
+- deterministic summary uses active goal + hot-file context + health counts
+- interactive mode can copy generated handoff prompt lines to clipboard
+- drop-zone/headless mode never writes to clipboard, but still returns/stores generated prompt lines
 
 ## Requirements
 

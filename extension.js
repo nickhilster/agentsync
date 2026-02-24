@@ -4,6 +4,7 @@ const path = require('path')
 const cp = require('child_process')
 
 const PLACEHOLDER = '-'
+const EM_DASH = 'â€”'
 const DEFAULT_STALE_HOURS = 24
 const OPEN_HANDOFF_STATUSES = new Set([
   'queued',
@@ -12,8 +13,19 @@ const OPEN_HANDOFF_STATUSES = new Set([
   'ready_for_review',
   'approved'
 ])
+const DEFAULT_END_SESSION_ZERO_TOUCH = Object.freeze({
+  enabled: false,
+  autonomy: 'mostly_full_auto',
+  copyPromptToClipboard: true,
+  maxSummaryLength: 180
+})
+const DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
+  claude: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] },
+  codex: { owner_mode: 'single', to_agents: ['claude'], required_capabilities: [] },
+  copilot: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] }
+})
 
-// ─── Path helpers ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Path helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Returns the templates directory bundled with this extension.
@@ -44,7 +56,7 @@ function getConfigPath(workspaceFolder) {
 /**
  * Resolve the .agentsync/ runtime directory for a workspace folder.
  * This directory holds state.json, request.json, and result.json.
- * It should be added to .gitignore — initWorkspace does this automatically.
+ * It should be added to .gitignore â€” initWorkspace does this automatically.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  * @returns {string}
  */
@@ -88,7 +100,7 @@ function getHandoffsPath(workspaceFolder) {
   return path.join(getAgentSyncDir(workspaceFolder), 'handoffs.json')
 }
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Whether a parsed value should be treated as empty.
@@ -96,7 +108,7 @@ function getHandoffsPath(workspaceFolder) {
  */
 function isEmptyValue(value) {
   const normalized = (value || '').trim()
-  return normalized.length === 0 || normalized === PLACEHOLDER || normalized === '—'
+  return normalized.length === 0 || normalized === PLACEHOLDER || normalized === EM_DASH
 }
 
 /**
@@ -105,7 +117,7 @@ function isEmptyValue(value) {
  */
 function parseTracker(content) {
   const pick = (label) => {
-    const match = content.match(new RegExp(`\\*\\*${label}:\\*\\*\\s*(.+)`))
+    const match = content.match(new RegExp(`\\*\\*${escapeRegExp(label)}:\\*\\*\\s*(.+)`))
     return match?.[1]?.trim() ?? PLACEHOLDER
   }
 
@@ -163,7 +175,7 @@ function setSectionBody(content, heading, body) {
   return `${content.trimEnd()}\n\n## ${heading}\n\n${normalizedBody}\n`
 }
 
-// ─── Workspace helpers ────────────────────────────────────────────────────────
+// â”€â”€â”€ Workspace helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Get active workspace folder without showing prompts.
@@ -209,7 +221,7 @@ async function resolveWorkspaceFolder(options = {}) {
   return selected?.folder ?? null
 }
 
-// ─── Config reader ────────────────────────────────────────────────────────────
+// â”€â”€â”€ Config reader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Read optional AgentSync configuration.
@@ -218,12 +230,71 @@ async function resolveWorkspaceFolder(options = {}) {
 function readAgentSyncConfig(workspaceFolder) {
   const settings = vscode.workspace.getConfiguration('agentsync', workspaceFolder?.uri)
   const settingsAutoStale = Number(settings.get('autoStaleSessionMinutes', 0))
+  const toNumber = (value, fallback) => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : fallback
+  }
+  const normalizeEndSessionAutomation = (value = {}) => {
+    const maxSummaryLength = Math.max(
+      60,
+      Math.min(260, Math.round(toNumber(value.maxSummaryLength, DEFAULT_END_SESSION_ZERO_TOUCH.maxSummaryLength)))
+    )
+    return {
+      enabled: value.enabled === true,
+      autonomy:
+        String(value.autonomy || DEFAULT_END_SESSION_ZERO_TOUCH.autonomy).trim() ||
+        DEFAULT_END_SESSION_ZERO_TOUCH.autonomy,
+      copyPromptToClipboard:
+        value.copyPromptToClipboard === undefined
+          ? DEFAULT_END_SESSION_ZERO_TOUCH.copyPromptToClipboard
+          : value.copyPromptToClipboard === true,
+      maxSummaryLength
+    }
+  }
+  const normalizeRoute = (route = {}) => {
+    const ownerMode = String(route.owner_mode || '').toLowerCase()
+    const toAgents = Array.isArray(route.to_agents)
+      ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
+      : []
+    const requiredCapabilities = Array.isArray(route.required_capabilities)
+      ? route.required_capabilities.map((c) => String(c || '').trim()).filter(Boolean)
+      : []
+    if (ownerMode === 'single' && toAgents.length === 1) {
+      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
+    }
+    if (ownerMode === 'shared' && toAgents.length === 2) {
+      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
+    }
+    if (ownerMode === 'auto' && requiredCapabilities.length > 0) {
+      return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities }
+    }
+    return null
+  }
+  const defaultRoutes = Object.fromEntries(
+    Object.entries(DEFAULT_HANDOFF_ROUTING_DEFAULTS).map(([agentId, route]) => [agentId, { ...route }])
+  )
+  const normalizeAutomation = (automation = {}) => {
+    const endSessionZeroTouch = normalizeEndSessionAutomation(automation.endSessionZeroTouch || {})
+    const configured = automation.handoffRoutingDefaults || {}
+    const handoffRoutingDefaults = { ...defaultRoutes }
+    if (configured && typeof configured === 'object') {
+      for (const [rawAgentId, route] of Object.entries(configured)) {
+        const agentId = canonicalAgentId(rawAgentId)
+        if (!agentId) continue
+        const normalizedRoute = normalizeRoute(route)
+        if (normalizedRoute) handoffRoutingDefaults[agentId] = normalizedRoute
+      }
+    }
+    return { endSessionZeroTouch, handoffRoutingDefaults }
+  }
   const defaults = {
     staleAfterHours: DEFAULT_STALE_HOURS,
     autoStaleSessionMinutes: Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0
       ? settingsAutoStale
       : 0,
-    commands: {}
+    commands: {},
+    requireHandoffOnEndSession: false,
+    automation: normalizeAutomation({})
   }
   const configPath = getConfigPath(workspaceFolder)
   if (!fs.existsSync(configPath)) return defaults
@@ -236,7 +307,7 @@ function readAgentSyncConfig(workspaceFolder) {
 
     return {
       staleAfterHours:
-        Number.isFinite(staleAfterHours) && staleAfterHours > 0
+        Number.isFinite(staleAfterHours) && staleAfterHours >= 0
           ? staleAfterHours
           : DEFAULT_STALE_HOURS,
       autoStaleSessionMinutes:
@@ -244,10 +315,26 @@ function readAgentSyncConfig(workspaceFolder) {
           ? autoStaleSessionMinutes
           : 0,
       commands: parsed.commands && typeof parsed.commands === 'object' ? parsed.commands : {},
-      requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true
+      requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
+      automation: normalizeAutomation(parsed.automation || {})
     }
   } catch {
     return defaults
+  }
+}
+
+/**
+ * Read .agentsync/state.json if present.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @returns {any | null}
+ */
+function readStateFile(workspaceFolder) {
+  const statePath = getStatePath(workspaceFolder)
+  if (!fs.existsSync(statePath)) return null
+  try {
+    return JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  } catch {
+    return null
   }
 }
 
@@ -313,7 +400,10 @@ function ensureHandoffsFile(workspaceFolder) {
     if (!fs.existsSync(handoffsPath)) {
       fs.writeFileSync(handoffsPath, JSON.stringify({ version: 1, handoffs: [] }, null, 2), 'utf8')
     }
-  } catch {}
+  } catch (err) {
+    // M4: only silently ignore ENOENT; log unexpected errors
+    if (err && err.code !== 'ENOENT') console.error('[AgentSync] ensureHandoffsFile error:', err)
+  }
 }
 
 /**
@@ -324,7 +414,8 @@ function ensureHandoffsFile(workspaceFolder) {
 function writeHandoffs(workspaceFolder, data) {
   fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
   const handoffsPath = getHandoffsPath(workspaceFolder)
-  fs.writeFileSync(handoffsPath, JSON.stringify(data, null, 2), 'utf8')
+  // C3: atomic write prevents partial-write corruption
+  atomicWriteFileSync(handoffsPath, JSON.stringify(data, null, 2))
 }
 
 /**
@@ -360,6 +451,13 @@ function validateHandoff(handoff) {
     }
   }
 
+  // M3: created_at is required for audit integrity
+  if (!handoff.created_at) {
+    errors.push('created_at is required')
+  } else if (typeof handoff.created_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(handoff.created_at)) {
+    errors.push('created_at must be an ISO 8601 timestamp')
+  }
+
   return { valid: errors.length === 0, errors }
 }
 
@@ -379,7 +477,8 @@ function getSessionStaleInfo(state, autoStaleSessionMinutes = 0) {
     return { isStale: false, ageMs: null, thresholdMs: null }
   }
 
-  const started = Date.parse(state.activeSession.startedAt)
+  // M5: use strict ISO parser to avoid silent misparse of locale date strings
+  const started = parseISODate(state.activeSession.startedAt)
   if (!Number.isFinite(started)) {
     return { isStale: false, ageMs: null, thresholdMs: autoStaleSessionMinutes * 60 * 1000 }
   }
@@ -496,7 +595,7 @@ function createNonce() {
   return text
 }
 
-// ─── Git helpers ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Git helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Run a git command and return stdout when successful.
@@ -530,27 +629,128 @@ function runGitExitCode(workspaceFolder, args) {
   return result.status
 }
 
-// ─── Health checks ────────────────────────────────────────────────────────────
+// â”€â”€â”€ Safe file I/O helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
- * Run a shell command for build/test/deploy checks.
- * Returns both a pass/fail boolean and the captured stdout+stderr output.
+ * Write a file atomically: write to a .tmp sibling then rename.
+ * Prevents partial-write corruption if VS Code or the OS crashes mid-write.
+ * On same-volume targets this rename is atomic on both NTFS and POSIX file systems.
+ * C3 fix.
+ * @param {string} filePath
+ * @param {string} content
+ * @param {BufferEncoding} [encoding]
+ */
+function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
+  const tmpPath = `${filePath}.tmp`
+  fs.writeFileSync(tmpPath, content, encoding)
+  fs.renameSync(tmpPath, filePath)
+}
+
+/**
+ * Parse an ISO 8601 timestamp string into a numeric epoch ms value.
+ * Returns NaN for non-ISO strings, avoiding silent misparse from Date.parse().
+ * M5 fix.
+ * @param {string | null | undefined} str
+ * @returns {number}
+ */
+function parseISODate(str) {
+  if (!str || typeof str !== 'string') return NaN
+  // Require at least YYYY-MM-DDTHH:MM prefix to reject locale date strings
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str)) return NaN
+  return Date.parse(str)
+}
+
+/**
+ * Tokenise a command string into [program, ...args] without invoking a shell.
+ * Handles quoted substrings (" and ') and backslash escapes within quotes.
+ * Does NOT support shell operators (&&, ||, ;, |, $(), backticks) â€” use a
+ * shell script file if you need composition in a health check command.
+ * C1 fix: prevents shell injection via user-controlled .agentsync.json commands.
+ * @param {string} cmd
+ * @returns {string[]}
+ */
+function parseCommandArgv(cmd) {
+  const args = []
+  let current = ''
+  let i = 0
+  while (i < cmd.length) {
+    const ch = cmd[i]
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      i++
+      while (i < cmd.length && cmd[i] !== quote) {
+        if (cmd[i] === '\\' && i + 1 < cmd.length) {
+          i++
+          current += cmd[i]
+        } else {
+          current += cmd[i]
+        }
+        i++
+      }
+      // skip closing quote (i++ at end of outer loop handles it)
+    } else if (ch === ' ' || ch === '\t') {
+      if (current.length > 0) { args.push(current); current = '' }
+    } else {
+      current += ch
+    }
+    i++
+  }
+  if (current.length > 0) args.push(current)
+  return args
+}
+
+// â”€â”€â”€ Health checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/**
+ * Run a health-check command safely and asynchronously.
+ * C1: command is tokenised via parseCommandArgv â€” shell:true is never used,
+ *     preventing injection via user-controlled .agentsync.json values.
+ * M1: uses cp.spawn (async) with a 60-second timeout so the extension host
+ *     is never blocked.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  * @param {string} command
- * @returns {{ ok: boolean, output: string }}
+ * @returns {Promise<{ ok: boolean, output: string }>}
  */
 function runCheckCommand(workspaceFolder, command) {
-  if (!command || !command.trim()) return { ok: false, output: '' }
+  if (!command || !command.trim()) return Promise.resolve({ ok: false, output: '' })
 
-  const result = cp.spawnSync(command, {
-    cwd: workspaceFolder.uri.fsPath,
-    encoding: 'utf8',
-    shell: true,
-    timeout: 10 * 60 * 1000
+  const argv = parseCommandArgv(command.trim())
+  if (argv.length === 0) return Promise.resolve({ ok: false, output: '' })
+  const [program, ...args] = argv
+
+  return new Promise((resolve) => {
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const proc = cp.spawn(program, args, { cwd: workspaceFolder.uri.fsPath })
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { proc.kill('SIGTERM') } catch {}
+      setTimeout(() => { try { proc.kill('SIGKILL') } catch {} }, 2000)
+      resolve({ ok: false, output: 'Health check timed out (60s limit).' })
+    }, 60 * 1000)
+
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString() })
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+
+    proc.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const output = [stdout, stderr].filter(Boolean).join('\n').trim()
+      resolve({ ok: code === 0, output })
+    })
+
+    proc.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ ok: false, output: err.message })
+    })
   })
-
-  const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
-  return { ok: !result.error && result.status === 0, output }
 }
 
 /**
@@ -582,10 +782,11 @@ function detectHotFiles(workspaceFolder) {
 
 /**
  * Execute configured health checks and return per-check status and output.
+ * M1: async so runCheckCommand's non-blocking spawn is properly awaited.
  * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {{ results: Record<string, string>, outputs: Record<string, string> }}
+ * @returns {Promise<{ results: Record<string, string>, outputs: Record<string, string> }>}
  */
-function runHealthChecks(workspaceFolder) {
+async function runHealthChecks(workspaceFolder) {
   const config = readAgentSyncConfig(workspaceFolder)
   const commandMap = {
     Build: config.commands?.build,
@@ -602,7 +803,7 @@ function runHealthChecks(workspaceFolder) {
       continue
     }
 
-    const { ok, output } = runCheckCommand(workspaceFolder, String(command))
+    const { ok, output } = await runCheckCommand(workspaceFolder, String(command))
     results[label] = ok ? 'Pass' : 'Fail'
     outputs[label] = output
   }
@@ -671,7 +872,7 @@ function renderTrackerHandoffsSection(handoffs) {
   return lines.join('\n')
 }
 
-// ─── Tracker I/O ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tracker I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Open a tracker file in the editor.
@@ -793,10 +994,11 @@ function readTracker(workspaceFolder) {
  * @param {string} content
  */
 function writeTracker(workspaceFolder, content) {
-  fs.writeFileSync(getTrackerPath(workspaceFolder), content, 'utf8')
+  // C3: atomic write prevents partial-write corruption
+  atomicWriteFileSync(getTrackerPath(workspaceFolder), content)
 }
 
-// ─── State file I/O ───────────────────────────────────────────────────────────
+// â”€â”€â”€ State file I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Write structured session state to .agentsync/state.json.
@@ -807,8 +1009,12 @@ function writeTracker(workspaceFolder, content) {
 function writeStateFile(workspaceFolder, data) {
   try {
     fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
-    fs.writeFileSync(getStatePath(workspaceFolder), JSON.stringify(data, null, 2), 'utf8')
-  } catch {}
+    // C3: atomic write prevents partial-write corruption
+    atomicWriteFileSync(getStatePath(workspaceFolder), JSON.stringify(data, null, 2))
+  } catch (err) {
+    // M4: log unexpected errors rather than silently swallowing them
+    if (err && err.code !== 'ENOENT') console.error('[AgentSync] writeStateFile error:', err)
+  }
 }
 
 /**
@@ -823,7 +1029,7 @@ function writeResultFile(workspaceFolder, data) {
   } catch {}
 }
 
-// ─── Tracker warnings ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Tracker warnings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Return warning strings for stale tracker/branch drift.
@@ -861,7 +1067,7 @@ function getTrackerWarnings(workspaceFolder, tracker) {
   return warnings
 }
 
-// ─── Prompt helpers ───────────────────────────────────────────────────────────
+// â”€â”€â”€ Prompt helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Prompt user for the acting agent.
@@ -896,7 +1102,303 @@ async function promptForAgent(defaultAgent) {
   return trimmed || null
 }
 
-// ─── Core session logic (headless — no VS Code UI) ────────────────────────────
+/**
+ * Normalize arbitrary text to a single trimmed line.
+ * @param {string | undefined | null} value
+ * @returns {string}
+ */
+function toSingleLine(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Truncate text while preserving a one-line shape.
+ * @param {string} value
+ * @param {number} maxLength
+ * @returns {string}
+ */
+function truncateSingleLine(value, maxLength) {
+  const line = toSingleLine(value)
+  if (!Number.isFinite(maxLength) || maxLength <= 0 || line.length <= maxLength) return line
+  if (maxLength <= 3) return line.slice(0, maxLength)
+  return `${line.slice(0, maxLength - 3).trimEnd()}...`
+}
+
+/**
+ * Count health check outcomes for summary text.
+ * @param {Record<string, string>} health
+ */
+function summarizeHealthCounts(health) {
+  const counts = { pass: 0, fail: 0, notConfigured: 0, total: 0 }
+  for (const status of Object.values(health || {})) {
+    const normalized = toSingleLine(status).toLowerCase()
+    if (normalized === 'pass') counts.pass += 1
+    else if (normalized === 'fail') counts.fail += 1
+    else counts.notConfigured += 1
+    counts.total += 1
+  }
+  return counts
+}
+
+/**
+ * Build a deterministic one-line summary for End Session automation.
+ * @param {{
+ *  goal: string,
+ *  hotFiles: string[],
+ *  health: Record<string, string>,
+ *  maxSummaryLength: number
+ * }} params
+ * @returns {string}
+ */
+function buildDeterministicSessionSummary(params) {
+  const goal = toSingleLine(params.goal) || 'Session update'
+  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : []
+  const topFiles = hotFiles.slice(0, 2)
+  const filesText =
+    topFiles.length > 0
+      ? `${hotFiles.length} hot file${hotFiles.length === 1 ? '' : 's'} (${topFiles.join(', ')})`
+      : '0 hot files'
+  const healthCounts = summarizeHealthCounts(params.health || {})
+  const healthText = `health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}`
+  return truncateSingleLine(`${goal}; ${filesText}; ${healthText}.`, params.maxSummaryLength)
+}
+
+/**
+ * Resolve deterministic routing defaults for a source agent.
+ * @param {ReturnType<typeof readAgentSyncConfig>} config
+ * @param {string} agent
+ * @returns {{ owner_mode: 'single' | 'shared' | 'auto', to_agents: string[], required_capabilities: string[] } | null}
+ */
+function resolveAutomationRoute(config, agent) {
+  const agentId = canonicalAgentId(agent)
+  if (!agentId) return null
+  const route = config?.automation?.handoffRoutingDefaults?.[agentId]
+  if (!route || typeof route !== 'object') return null
+
+  const ownerMode = String(route.owner_mode || '').toLowerCase()
+  const toAgents = Array.isArray(route.to_agents)
+    ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
+    : []
+  const requiredCapabilities = Array.isArray(route.required_capabilities)
+    ? route.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
+    : []
+
+  if (ownerMode === 'single' && toAgents.length === 1) {
+    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
+  }
+  if (ownerMode === 'shared' && toAgents.length === 2) {
+    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
+  }
+  if (ownerMode === 'auto' && requiredCapabilities.length > 0) {
+    return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities }
+  }
+  return null
+}
+
+/**
+ * Build deterministic automation notes for handoff records.
+ * @param {{
+ *  summary: string,
+ *  hotFiles: string[],
+ *  health: Record<string, string>,
+ *  sourceAgent: string
+ * }} params
+ * @returns {string}
+ */
+function buildAutomationHandoffNotes(params) {
+  const summary = toSingleLine(params.summary)
+  const sourceAgent = canonicalAgentId(params.sourceAgent) || 'unknown'
+  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : []
+  const topFiles = hotFiles.slice(0, 2).join(', ') || 'none'
+  const healthCounts = summarizeHealthCounts(params.health || {})
+  return toSingleLine(
+    `Auto-drafted from ${sourceAgent}. Goal: ${summary}. Start with files: ${topFiles}. Health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}.`
+  )
+}
+
+/**
+ * Build one-line handoff prompts for downstream agents.
+ * @param {any} handoffRecord
+ * @returns {string[]}
+ */
+function buildHandoffPromptLines(handoffRecord) {
+  if (!handoffRecord || handoffRecord.no_handoff_reason) return []
+
+  const handoffId = toSingleLine(handoffRecord.handoff_id) || 'HO-UNKNOWN'
+  const branch = toSingleLine(handoffRecord.branch) || PLACEHOLDER
+  const commit = toSingleLine(handoffRecord.commit) || PLACEHOLDER
+  const files = Array.isArray(handoffRecord.files) ? handoffRecord.files.filter(Boolean) : []
+  const startFiles = files.slice(0, 2).join(', ') || 'AgentTracker.md'
+  const summary = toSingleLine(handoffRecord.summary) || 'continue the current work'
+  const mode = String(handoffRecord.owner_mode || '').toLowerCase()
+
+  const buildLine = (targetLabel) =>
+    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json.`
+
+  if (mode === 'auto') {
+    const caps = Array.isArray(handoffRecord.required_capabilities)
+      ? handoffRecord.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
+      : []
+    const capabilityLabel = caps.length > 0 ? `capabilities ${caps.join(', ')}` : 'required capabilities'
+    return [buildLine(capabilityLabel)]
+  }
+
+  const targets = Array.isArray(handoffRecord.to_agents)
+    ? handoffRecord.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
+    : []
+  if (targets.length === 0) return [buildLine('next owner')]
+  return targets.map((target) => buildLine(target))
+}
+
+/**
+ * Prompt once for fallback routing when automation defaults are unavailable.
+ * @param {number} hotFileCount
+ * @returns {Promise<{ handoffData: any, automationContext: string } | null>}
+ */
+async function promptAutomationFallbackRouting(hotFileCount) {
+  const modeChoice = await vscode.window.showQuickPick(
+    [
+      { label: 'single', description: 'Route to one target agent' },
+      { label: 'shared', description: 'Route to exactly two agents' },
+      { label: 'auto', description: 'Route by required capabilities' },
+      { label: 'skip', description: 'Skip creating a handoff record for now' }
+    ],
+    {
+      placeHolder: `${hotFileCount} hot file(s) detected. Select fallback routing mode.`,
+      ignoreFocusOut: true
+    }
+  )
+  if (!modeChoice) return null
+
+  const selected = modeChoice.label
+  if (selected === 'skip') {
+    return {
+      handoffData: {
+        no_handoff_reason: 'Zero-touch fallback selected skip.',
+        automation_context: 'fallback:skip'
+      },
+      automationContext: 'fallback:skip'
+    }
+  }
+
+  const inputPrompt =
+    selected === 'single'
+      ? 'Fallback target agent (single owner)'
+      : selected === 'shared'
+        ? 'Fallback target agents (comma-separated, exactly two)'
+        : 'Fallback required capabilities (comma-separated)'
+
+  const rawInput = await vscode.window.showInputBox({
+    prompt: inputPrompt,
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const parts = String(value || '')
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+      if (selected === 'single') return parts.length === 1 ? null : 'Enter exactly one target agent.'
+      if (selected === 'shared') return parts.length === 2 ? null : 'Enter exactly two target agents.'
+      return parts.length > 0 ? null : 'Enter at least one capability.'
+    }
+  })
+  if (rawInput === undefined) return null
+
+  const values = rawInput
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean)
+
+  if (selected === 'single') {
+    return {
+      handoffData: {
+        owner_mode: 'single',
+        to_agents: [canonicalAgentId(values[0])],
+        required_capabilities: [],
+        no_handoff_reason: null,
+        automation_context: 'fallback:single'
+      },
+      automationContext: 'fallback:single'
+    }
+  }
+  if (selected === 'shared') {
+    return {
+      handoffData: {
+        owner_mode: 'shared',
+        to_agents: values.slice(0, 2).map((v) => canonicalAgentId(v)),
+        required_capabilities: [],
+        no_handoff_reason: null,
+        automation_context: 'fallback:shared'
+      },
+      automationContext: 'fallback:shared'
+    }
+  }
+
+  return {
+    handoffData: {
+      owner_mode: 'auto',
+      to_agents: [],
+      required_capabilities: values,
+      no_handoff_reason: null,
+      automation_context: 'fallback:auto'
+    },
+    automationContext: 'fallback:auto'
+  }
+}
+
+/**
+ * Copy generated handoff prompt lines to clipboard.
+ * For multiple prompts, user selects which one to copy.
+ * @param {string[]} promptLines
+ * @returns {Promise<boolean>}
+ */
+async function copyHandoffPromptToClipboard(promptLines) {
+  if (!Array.isArray(promptLines) || promptLines.length === 0) return false
+
+  if (promptLines.length === 1) {
+    await vscode.env.clipboard.writeText(promptLines[0])
+    return true
+  }
+
+  const picks = promptLines.map((line, index) => ({
+    label: `Prompt ${index + 1}`,
+    description: line,
+    line
+  }))
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: 'Select which handoff prompt to copy',
+    ignoreFocusOut: true
+  })
+  if (!selected) return false
+  await vscode.env.clipboard.writeText(selected.line)
+  return true
+}
+
+/**
+ * Update prompt_copied_to_clipboard on an existing handoff record.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string | null | undefined} handoffId
+ * @param {boolean} copied
+ */
+function updateHandoffPromptCopiedFlag(workspaceFolder, handoffId, copied) {
+  const normalizedId = toSingleLine(handoffId)
+  if (!normalizedId) return
+  const store = readHandoffs(workspaceFolder)
+  if (!store.handoffs.length) return
+  const next = store.handoffs.map((handoff) => {
+    if (toSingleLine(handoff?.handoff_id) !== normalizedId) return handoff
+    return {
+      ...handoff,
+      prompt_copied_to_clipboard: copied === true,
+      updated_at: new Date().toISOString()
+    }
+  })
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: next })
+}
+
+
+// â”€â”€â”€ Core session logic (headless â€” no VS Code UI) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // These functions contain the pure tracker mutation logic.
 // They are called by the interactive VS Code commands and by the drop-zone API,
@@ -958,19 +1460,77 @@ function startSessionCore(workspaceFolder, agent, goal) {
  * @param {string} agent
  * @param {string} summary
  * @param {string} [nextWork]
- * @param {{ summary: string, notes?: string, owner_mode: string, to_agents?: string[], required_capabilities?: string[], no_handoff_reason?: string } | null} [handoffData]
- * @returns {{ health: Record<string, string>, healthOutputs: Record<string, string>, hotFiles: string[], handoff: object | null }}
+ * @param {{ summary?: string, notes?: string, owner_mode?: string, to_agents?: string[], required_capabilities?: string[], no_handoff_reason?: string, automation_context?: string | null, task_id?: string | null } | null} [handoffData]
+ * @param {{ hotFiles?: string[], healthResults?: Record<string, string>, healthOutputs?: Record<string, string>, summarySource?: 'user' | 'deterministic', automationUsed?: boolean, automationContext?: string | null, goalHint?: string | null }} [options]
+ * @returns {{ health: Record<string, string>, healthOutputs: Record<string, string>, hotFiles: string[], handoff: object | null, generatedSummary: string, summarySource: 'user' | 'deterministic', handoffPrompts: string[], promptCopiedToClipboard: boolean }}
  */
-function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData = null) {
+async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData = null, options = {}) {
   let content = readTracker(workspaceFolder)
   if (!content) throw new Error('Could not read AgentTracker.md')
 
   const config = readAgentSyncConfig(workspaceFolder)
+  const zeroTouchCfg = config.automation?.endSessionZeroTouch || DEFAULT_END_SESSION_ZERO_TOUCH
+  const state = readStateFile(workspaceFolder) || {}
   const now = new Date().toISOString()
   const branch = runGit(workspaceFolder, ['rev-parse', '--abbrev-ref', 'HEAD']) || PLACEHOLDER
   const commit = runGit(workspaceFolder, ['rev-parse', '--short', 'HEAD']) || PLACEHOLDER
-  const hotFiles = detectHotFiles(workspaceFolder)
-  const { results: health, outputs: healthOutputs } = runHealthChecks(workspaceFolder)
+  const hotFiles = Array.isArray(options.hotFiles) ? options.hotFiles : detectHotFiles(workspaceFolder)
+
+  // M1: await the now-async health checks so the host is not blocked
+  let health = options.healthResults
+  let healthOutputs = options.healthOutputs
+  if (!health || !healthOutputs) {
+    const checks = await runHealthChecks(workspaceFolder)
+    health = checks.results
+    healthOutputs = checks.outputs
+  }
+  if (!health || typeof health !== 'object') health = {}
+  if (!healthOutputs || typeof healthOutputs !== 'object') healthOutputs = {}
+
+  const goalHint = toSingleLine(options.goalHint || state?.activeSession?.goal || '')
+  let normalizedSummary = toSingleLine(summary)
+  let summarySource = options.summarySource === 'deterministic' ? 'deterministic' : 'user'
+  let automationUsed = options.automationUsed === true
+  const automationFeatureEnabled = zeroTouchCfg.enabled || options.automationUsed === true
+
+  if (!normalizedSummary && zeroTouchCfg.enabled) {
+    normalizedSummary = buildDeterministicSessionSummary({
+      goal: goalHint,
+      hotFiles,
+      health,
+      maxSummaryLength: zeroTouchCfg.maxSummaryLength
+    })
+    summarySource = 'deterministic'
+    automationUsed = true
+  }
+
+  const persistedSummary = normalizedSummary || PLACEHOLDER
+
+  let automationContext =
+    toSingleLine(options.automationContext || (handoffData && handoffData.automation_context) || '') || null
+
+  // Auto-route handoff for headless/automated paths when hot files exist and routing defaults are known.
+  if (hotFiles.length > 0 && handoffData === null && zeroTouchCfg.enabled) {
+    const autoRoute = resolveAutomationRoute(config, agent)
+    if (autoRoute) {
+      handoffData = {
+        summary: normalizedSummary || 'Session update',
+        notes: buildAutomationHandoffNotes({
+          summary: normalizedSummary || 'Session update',
+          hotFiles,
+          health,
+          sourceAgent: agent
+        }),
+        owner_mode: autoRoute.owner_mode,
+        to_agents: autoRoute.to_agents,
+        required_capabilities: autoRoute.required_capabilities,
+        no_handoff_reason: null,
+        automation_context: 'default:' + canonicalAgentId(agent)
+      }
+      automationContext = handoffData.automation_context
+      automationUsed = true
+    }
+  }
 
   // Enforce handoff requirement when hot files exist and flag is on
   if (hotFiles.length > 0 && config.requireHandoffOnEndSession && handoffData === null) {
@@ -983,11 +1543,11 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
     content,
     'Last Session',
     [
-      `- **Agent:** ${agent}`,
-      `- **Date:** ${now}`,
-      `- **Summary:** ${(summary || '').trim() || PLACEHOLDER}`,
-      `- **Branch:** ${branch}`,
-      `- **Commit:** ${commit}`
+      '- **Agent:** ' + agent,
+      '- **Date:** ' + now,
+      '- **Summary:** ' + persistedSummary,
+      '- **Branch:** ' + branch,
+      '- **Commit:** ' + commit
     ].join('\n')
   )
 
@@ -995,7 +1555,7 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
   content = setSectionBody(
     content,
     'Hot Files',
-    hotFiles.length > 0 ? hotFiles.map((file) => `- \`${file}\``).join('\n') : '*None*'
+    hotFiles.length > 0 ? hotFiles.map((file) => '- `' + file + '`').join('\n') : '*None*'
   )
 
   const inProgressBody = getSectionBody(content, 'In Progress')
@@ -1013,7 +1573,8 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
     remainingInProgress.length > 0 ? remainingInProgress.join('\n') : '*Nothing active*'
   )
 
-  if (nextWork && nextWork.trim()) {
+  const normalizedNextWork = toSingleLine(nextWork)
+  if (normalizedNextWork) {
     const existingNext = getSectionBody(content, 'Suggested Next Work')
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -1023,21 +1584,26 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
     content = setSectionBody(
       content,
       'Suggested Next Work',
-      [...existingNext, `- ${nextWork.trim()}`].join('\n')
+      [...existingNext, '- ' + normalizedNextWork].join('\n')
     )
   }
 
   // Persist handoff record if provided
   let handoffRecord = null
+  let generatedPromptLines = []
   if (handoffData !== null) {
     const existingHandoffs = readHandoffs(workspaceFolder)
     const allHandoffs = existingHandoffs.handoffs
     const dateStr = now.slice(0, 10).replace(/-/g, '')
     const seq = String(allHandoffs.length + 1).padStart(3, '0')
-    const handoffId = `HO-${dateStr}-${seq}`
+    const handoffId = 'HO-' + dateStr + '-' + seq
 
     if (handoffData.no_handoff_reason) {
-      // Skip record — agent opted out with an explicit reason
+      // H5: validate skip reason before writing - previously bypassed validateHandoff()
+      const skipReason = String(handoffData.no_handoff_reason).trim()
+      if (!skipReason) throw new Error('no_handoff_reason must be a non-empty string')
+
+      // Skip record - agent opted out with an explicit reason
       handoffRecord = {
         handoff_id: handoffId,
         task_id: null,
@@ -1048,11 +1614,15 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
         required_capabilities: [],
         summary: '',
         notes: '',
-        no_handoff_reason: handoffData.no_handoff_reason.trim(),
+        no_handoff_reason: skipReason,
         files: hotFiles,
         branch,
         commit,
         prior_attempts: 0,
+        generated_prompt_lines: [],
+        prompt_copied_to_clipboard: false,
+        summary_source: summarySource,
+        automation_context: automationContext,
         created_at: now,
         updated_at: now,
         state_history: [{ status: 'queued', agent: canonicalAgentId(agent), timestamp: now, reason: 'skipped' }]
@@ -1067,20 +1637,35 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
         owner_mode: String(handoffData.owner_mode || 'single').toLowerCase(),
         status: 'queued',
         required_capabilities: handoffData.required_capabilities || [],
-        summary: (handoffData.summary || '').trim(),
-        notes: (handoffData.notes || '').trim(),
+        summary: toSingleLine(handoffData.summary || normalizedSummary || 'Session update'),
+        notes: toSingleLine(handoffData.notes || ''),
         no_handoff_reason: null,
         files: hotFiles,
         branch,
         commit,
         prior_attempts: 0,
+        generated_prompt_lines: [],
+        prompt_copied_to_clipboard: false,
+        summary_source: summarySource,
+        automation_context:
+          toSingleLine(handoffData.automation_context || automationContext || '') || null,
         created_at: now,
         updated_at: now,
         state_history: [{ status: 'queued', agent: canonicalAgentId(agent), timestamp: now, reason: 'session ended with hot files' }]
       }
 
       const { valid, errors } = validateHandoff(handoffRecord)
-      if (!valid) throw new Error(`Invalid handoff: ${errors.join('; ')}`)
+      if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
+    }
+
+    if (automationFeatureEnabled) {
+      generatedPromptLines = buildHandoffPromptLines(handoffRecord)
+      handoffRecord.generated_prompt_lines = generatedPromptLines
+    } else {
+      delete handoffRecord.generated_prompt_lines
+      delete handoffRecord.prompt_copied_to_clipboard
+      delete handoffRecord.summary_source
+      delete handoffRecord.automation_context
     }
 
     const updatedHandoffs = [...allHandoffs, handoffRecord]
@@ -1094,23 +1679,36 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
     }
   }
 
+  // C4: write tracker before state.json so that if state write fails, the session
+  // remains "Busy" in the UI (recoverable via Clear Active Session) rather than
+  // falsely appearing "Ready" while the tracker still shows the old session.
   writeTracker(workspaceFolder, content)
 
   // Compute open handoff summary for state.json so the panel can read it without opening handoffs.json
   const currentHandoffs = readHandoffs(workspaceFolder)
   const openHandoffs = currentHandoffs.handoffs.filter(isOpenHandoff)
+  const shouldWriteAutomationState =
+    automationFeatureEnabled && (automationUsed || summarySource === 'deterministic' || generatedPromptLines.length > 0)
+  const stateLastSession = {
+    agent,
+    date: now,
+    summary: persistedSummary,
+    branch,
+    commit
+  }
+
+  if (shouldWriteAutomationState) {
+    stateLastSession.generatedSummary = normalizedSummary || persistedSummary
+    stateLastSession.summarySource = summarySource
+    stateLastSession.automationUsed = automationUsed
+    stateLastSession.generatedPrompts = generatedPromptLines
+  }
 
   writeStateFile(workspaceFolder, {
     sessionActive: false,
     lastUpdated: now,
     activeSession: null,
-    lastSession: {
-      agent,
-      date: now,
-      summary: (summary || '').trim() || PLACEHOLDER,
-      branch,
-      commit
-    },
+    lastSession: stateLastSession,
     health: Object.fromEntries(
       Object.entries(health).map(([label, status]) => [
         label,
@@ -1122,7 +1720,16 @@ function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData =
     activeHandoffIds: openHandoffs.map((h) => String(h.handoff_id || h.task_id || ''))
   })
 
-  return { health, healthOutputs, hotFiles, handoff: handoffRecord }
+  return {
+    health,
+    healthOutputs,
+    hotFiles,
+    handoff: handoffRecord,
+    generatedSummary: normalizedSummary || persistedSummary,
+    summarySource,
+    handoffPrompts: generatedPromptLines,
+    promptCopiedToClipboard: false
+  }
 }
 
 /**
@@ -1176,7 +1783,7 @@ function clearActiveSessionCore(workspaceFolder) {
   return { cleared: true, agent }
 }
 
-// ─── Drop-zone API ────────────────────────────────────────────────────────────
+// â”€â”€â”€ Drop-zone API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Terminal agents, scripts, and CI can drive AgentSync by writing a JSON file
 // to .agentsync/request.json in the workspace root. The extension watches for
@@ -1185,7 +1792,7 @@ function clearActiveSessionCore(workspaceFolder) {
 // Supported actions:
 //
 //   startSession  { action, agent, goal? }
-//   endSession    { action, agent, summary?, nextWork? }
+//   endSession    { action, agent, summary?, nextWork?, handoff? }
 //   status        { action }
 //   health        { action }
 //
@@ -1195,17 +1802,42 @@ function clearActiveSessionCore(workspaceFolder) {
 //   # Poll .agentsync/result.json for { "ok": true, ... }
 
 /**
+ * Per-folder in-flight guard for processDropZoneRequest.
+ * Prevents both onDidChange and onDidCreate firing on the same file from
+ * causing duplicate processing (C2 / H1 fix).
+ * @type {Set<string>}
+ */
+const _dropZoneInFlight = new Set()
+
+/**
  * Process a drop-zone request file and write the result.
- * The request file is deleted immediately after being read to prevent re-processing.
+ * C2 fix: request.json is renamed to request.json.processing BEFORE reading â€”
+ * this is atomic on same-volume writes and prevents the race where a crash after
+ * delete but before write left no result for the caller.  An in-flight Set
+ * prevents concurrent calls (onDidChange + onDidCreate both firing) from
+ * racing to claim the same file.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  */
 async function processDropZoneRequest(workspaceFolder) {
+  const folderKey = workspaceFolder.uri.fsPath
+  // H1/C2: skip if already processing this folder
+  if (_dropZoneInFlight.has(folderKey)) return
+
   const requestPath = getRequestPath(workspaceFolder)
-  if (!fs.existsSync(requestPath)) return
+  const claimPath = requestPath + '.processing'
+
+  // Atomically claim the file â€” if another call already renamed it, renameSync throws
+  try {
+    fs.renameSync(requestPath, claimPath)
+  } catch {
+    return // File doesn't exist or was already claimed by a concurrent call
+  }
+
+  _dropZoneInFlight.add(folderKey)
 
   let request
   try {
-    const raw = fs.readFileSync(requestPath, 'utf8')
+    const raw = fs.readFileSync(claimPath, 'utf8')
     request = JSON.parse(raw)
   } catch {
     writeResultFile(workspaceFolder, {
@@ -1213,12 +1845,12 @@ async function processDropZoneRequest(workspaceFolder) {
       error: 'Invalid JSON in request file',
       timestamp: new Date().toISOString()
     })
-    try { fs.unlinkSync(requestPath) } catch {}
+    try { fs.unlinkSync(claimPath) } catch (err) {
+      if (err && err.code !== 'ENOENT') console.error('[AgentSync] drop-zone cleanup error:', err)
+    }
+    _dropZoneInFlight.delete(folderKey)
     return
   }
-
-  // Delete the request file immediately to prevent double-processing
-  try { fs.unlinkSync(requestPath) } catch {}
 
   const { action } = request || {}
   const timestamp = new Date().toISOString()
@@ -1236,14 +1868,42 @@ async function processDropZoneRequest(workspaceFolder) {
       case 'endSession': {
         const { agent, summary, nextWork, handoff } = request
         if (!agent) throw new Error('Missing required field: agent')
-        const { health, hotFiles, handoff: handoffRecord } = endSessionCore(
+        const hasProvidedSummary = typeof summary === 'string' && toSingleLine(summary).length > 0
+        const zeroTouchEnabled =
+          readAgentSyncConfig(workspaceFolder).automation?.endSessionZeroTouch?.enabled === true
+        // M1: endSessionCore is now async
+        const {
+          health,
+          hotFiles,
+          handoff: handoffRecord,
+          generatedSummary,
+          summarySource,
+          handoffPrompts
+        } = await endSessionCore(
           workspaceFolder,
           agent,
           summary || '',
           nextWork || '',
-          handoff || null
+          handoff || null,
+          {
+            summarySource: !hasProvidedSummary && zeroTouchEnabled ? 'deterministic' : 'user',
+            automationUsed: zeroTouchEnabled && !hasProvidedSummary
+          }
         )
-        writeResultFile(workspaceFolder, { ok: true, action, timestamp, data: { health, hotFiles, handoff: handoffRecord } })
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: {
+            health,
+            hotFiles,
+            handoff: handoffRecord,
+            generatedSummary,
+            summarySource,
+            handoffPrompts,
+            promptCopiedToClipboard: false
+          }
+        })
         break
       }
 
@@ -1256,7 +1916,8 @@ async function processDropZoneRequest(workspaceFolder) {
       }
 
       case 'health': {
-        const { results, outputs } = runHealthChecks(workspaceFolder)
+        // M1: runHealthChecks is now async
+        const { results, outputs } = await runHealthChecks(workspaceFolder)
         writeResultFile(workspaceFolder, { ok: true, action, timestamp, data: { results, outputs } })
         break
       }
@@ -1266,10 +1927,16 @@ async function processDropZoneRequest(workspaceFolder) {
     }
   } catch (err) {
     writeResultFile(workspaceFolder, { ok: false, error: err.message, action, timestamp })
+  } finally {
+    // C2: clean up claim file and release lock regardless of success or failure
+    try { fs.unlinkSync(claimPath) } catch (err) {
+      if (err && err.code !== 'ENOENT') console.error('[AgentSync] drop-zone cleanup error:', err)
+    }
+    _dropZoneInFlight.delete(folderKey)
   }
 }
 
-// ─── Tree view ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tree view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Format a duration in milliseconds as a human-readable elapsed string.
@@ -1287,7 +1954,7 @@ function formatElapsed(ms) {
  * Build a normalized snapshot for the live webview dashboard.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  */
-function getDashboardModel(workspaceFolder) {
+function getDashboardModel(workspaceFolder, viewMode = 'compact') {
   const trackerContent = readTracker(workspaceFolder)
   const tracker = trackerContent
     ? parseTracker(trackerContent)
@@ -1355,10 +2022,27 @@ function getDashboardModel(workspaceFolder) {
     mode: String(h?.owner_mode || 'unknown'),
     owners: Array.isArray(h?.to_agents) ? h.to_agents : []
   })
+  const compactTasks = inProgressLines.slice(0, 2)
+  const compactExtraTaskCount = Math.max(0, inProgressLines.length - compactTasks.length)
+  const rawSessionGoal = String(state?.activeSession?.goal || '').trim()
+  const rawFirstInProgress = String(inProgressLines[0] || '').trim()
+  const rawTrackerSummary = String(tracker.summary || '').trim()
+  let focusText = 'No active goal'
+  if (!isEmptyValue(rawSessionGoal)) {
+    focusText = rawSessionGoal
+  } else if (!isEmptyValue(rawFirstInProgress)) {
+    focusText = rawFirstInProgress
+  } else if (!isEmptyValue(rawTrackerSummary)) {
+    focusText = rawTrackerSummary
+  }
+  const normalizedViewMode = viewMode === 'full' ? 'full' : 'compact'
 
   return {
     hasWorkspace: true,
     workspace: workspaceFolder.name,
+    ui: {
+      viewMode: normalizedViewMode
+    },
     state: {
       key: opsState.key,
       label: opsState.label,
@@ -1383,6 +2067,11 @@ function getDashboardModel(workspaceFolder) {
     },
     warnings,
     inProgress: inProgressLines,
+    compact: {
+      focusText,
+      tasks: compactTasks,
+      extraTaskCount: compactExtraTaskCount
+    },
     health: {
       Build: toStatus(health.Build),
       Tests: toStatus(health.Tests),
@@ -1479,13 +2168,30 @@ function getDashboardHtml() {
     .badge.busy { color: #420e12; background: var(--busy); border-color: #ff9aa0; }
     .badge.waiting { color: #4a2e04; background: var(--waiting); border-color: #ffd898; }
     .pulse { color: var(--muted); opacity: 0.9; }
+    .mode-toggle {
+      margin-left: auto;
+      border: 1px solid var(--line);
+      background: rgba(11, 29, 18, 0.85);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .mode-toggle:hover {
+      border-color: #6adf9a;
+      background: rgba(15, 40, 24, 0.9);
+    }
     .actions {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
       gap: 7px;
       margin-bottom: 10px;
     }
-    .actions.busy button.action {
+    .actions.busy button.action,
+    .compact-actions.busy button.action,
+    .compact-more-actions.busy button.action {
       opacity: 0.65;
       cursor: wait;
     }
@@ -1502,6 +2208,67 @@ function getDashboardHtml() {
     button.action:hover {
       border-color: #6adf9a;
       background: rgba(15, 40, 24, 0.9);
+    }
+    button.action.active-command,
+    button.recovery-action.active-command {
+      border-color: var(--active-command-color, #c8d2d8);
+      background: var(--active-command-bg, rgba(19, 33, 24, 0.92));
+      box-shadow:
+        0 0 0 1px var(--active-command-color, #c8d2d8),
+        0 0 12px -2px var(--active-command-color, #c8d2d8);
+    }
+    .compact-panel {
+      margin-bottom: 10px;
+      padding: 8px;
+    }
+    .compact-focus {
+      margin-bottom: 6px;
+      font-weight: 700;
+      color: #c0f0d3;
+    }
+    .compact-task-list {
+      margin: 0;
+      padding-left: 16px;
+      max-height: 90px;
+      overflow: auto;
+    }
+    .compact-task-list li {
+      margin: 3px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .compact-task-list li.empty {
+      list-style: none;
+      margin-left: -16px;
+      color: var(--muted);
+    }
+    .compact-more-count {
+      min-height: 16px;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .compact-actions {
+      margin-top: 6px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 5px;
+    }
+    .compact-more-actions {
+      margin-top: 5px;
+      display: none;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 5px;
+    }
+    .compact-more-actions.open {
+      display: grid;
+    }
+    button.action.compact-action {
+      font-size: 11px;
+      padding: 4px 6px;
+      min-height: 28px;
+      border-radius: 7px;
     }
     .grid {
       display: grid;
@@ -1604,9 +2371,15 @@ function getDashboardHtml() {
       border-color: #6adf9a;
       background: rgba(15, 40, 24, 0.9);
     }
+    body[data-view-mode="compact"] .full-panel {
+      display: none;
+    }
+    body[data-view-mode="full"] .compact-panel {
+      display: none;
+    }
   </style>
 </head>
-<body data-state="ready">
+<body data-state="ready" data-view-mode="compact">
   <canvas id="matrix"></canvas>
   <div class="backdrop"></div>
   <div class="app">
@@ -1615,95 +2388,120 @@ function getDashboardHtml() {
       <span id="stateBadge" class="badge ready">READY</span>
       <span id="statePulse" class="pulse">[idle]</span>
       <span id="workspaceName" class="pulse"></span>
+      <button id="modeToggle" class="mode-toggle" data-role="mode-toggle">Show Full</button>
     </div>
 
-    <div class="actions">
-      <button class="action" data-command="agentsync.init">Initialize Workspace</button>
-      <button class="action" data-command="agentsync.startSession">Start Session</button>
-      <button class="action" data-command="agentsync.endSession">End Session</button>
-      <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
-      <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
-      <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
-      <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
-      <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
-    </div>
-
-    <section class="card action-center">
-      <h3>Action Center</h3>
-      <div id="actionLive" class="action-live">
-        <div id="actionTitle" class="action-title">Idle</div>
-        <div id="actionDetail">Choose an action to begin.</div>
+    <section id="compactPanel" class="card compact-panel">
+      <h3>Current Focus</h3>
+      <div id="compactFocus" class="compact-focus">No active goal</div>
+      <ul id="compactTasks" class="compact-task-list"></ul>
+      <div id="compactMoreCount" class="compact-more-count"></div>
+      <div class="compact-actions">
+        <button class="action compact-action" data-command="agentsync.startSession">Start Session</button>
+        <button class="action compact-action" data-command="agentsync.endSession">End Session</button>
+        <button class="action compact-action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
+        <button class="action compact-action" data-command="agentsync.openTracker">Open AgentTracker</button>
+        <button class="action compact-action" data-role="compact-more-toggle">More</button>
       </div>
-      <div id="recoveryActions" class="recovery">
-        <button class="recovery-action" data-command="agentsync.openTracker">Open Tracker</button>
-        <button class="recovery-action" data-command="agentsync.refreshPanel">Refresh</button>
+      <div id="compactMoreActions" class="compact-more-actions">
+        <button class="action compact-action" data-command="agentsync.init">Initialize Workspace</button>
+        <button class="action compact-action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action compact-action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
+        <button class="action compact-action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
-      <dl class="kv">
-        <dt>Next step</dt><dd id="nextStep">-</dd>
-        <dt>Last update</dt><dd id="actionUpdated">-</dd>
-        <dt>Data refreshed</dt><dd id="dataRefreshed">-</dd>
-      </dl>
-      <ul id="onboardingList" class="checklist"></ul>
     </section>
 
-    <div class="grid">
-      <section class="card">
-        <h3>Overview</h3>
+    <div id="fullPanel" class="full-panel">
+      <div class="actions">
+        <button class="action" data-command="agentsync.init">Initialize Workspace</button>
+        <button class="action" data-command="agentsync.startSession">Start Session</button>
+        <button class="action" data-command="agentsync.endSession">End Session</button>
+        <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
+        <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
+        <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
+        <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
+      </div>
+
+      <section class="card action-center">
+        <h3>Action Center</h3>
+        <div id="actionLive" class="action-live">
+          <div id="actionTitle" class="action-title">Idle</div>
+          <div id="actionDetail">Choose an action to begin.</div>
+        </div>
+        <div id="recoveryActions" class="recovery">
+          <button class="recovery-action" data-command="agentsync.openTracker">Open Tracker</button>
+          <button class="recovery-action" data-command="agentsync.refreshPanel">Refresh</button>
+        </div>
         <dl class="kv">
-          <dt>State</dt><dd id="stateText">-</dd>
-          <dt>Reason</dt><dd id="stateReason">-</dd>
-          <dt>Open handoffs</dt><dd id="openHandoffs">0</dd>
-          <dt>In progress</dt><dd id="inProgressCount">0</dd>
+          <dt>Next step</dt><dd id="nextStep">-</dd>
+          <dt>Last update</dt><dd id="actionUpdated">-</dd>
+          <dt>Data refreshed</dt><dd id="dataRefreshed">-</dd>
         </dl>
+        <ul id="onboardingList" class="checklist"></ul>
       </section>
 
-      <section class="card">
-        <h3>Session</h3>
-        <dl class="kv">
-          <dt>Active</dt><dd id="sessionActive">No</dd>
-          <dt>Agent</dt><dd id="sessionAgent">None</dd>
-          <dt>Goal</dt><dd id="sessionGoal">No active goal</dd>
-          <dt>Started</dt><dd id="sessionStarted">-</dd>
-        </dl>
-      </section>
+      <div class="grid">
+        <section class="card">
+          <h3>Overview</h3>
+          <dl class="kv">
+            <dt>State</dt><dd id="stateText">-</dd>
+            <dt>Reason</dt><dd id="stateReason">-</dd>
+            <dt>Open handoffs</dt><dd id="openHandoffs">0</dd>
+            <dt>In progress</dt><dd id="inProgressCount">0</dd>
+          </dl>
+        </section>
 
-      <section class="card">
-        <h3>Health</h3>
-        <ul id="healthList" class="list"></ul>
-      </section>
+        <section class="card">
+          <h3>Session</h3>
+          <dl class="kv">
+            <dt>Active</dt><dd id="sessionActive">No</dd>
+            <dt>Agent</dt><dd id="sessionAgent">None</dd>
+            <dt>Goal</dt><dd id="sessionGoal">No active goal</dd>
+            <dt>Started</dt><dd id="sessionStarted">-</dd>
+          </dl>
+        </section>
 
-      <section class="card">
-        <h3>Handoffs</h3>
-        <div><strong>Assigned to me</strong></div>
-        <ul id="handoffAssigned" class="list"></ul>
-        <div style="margin-top: 6px;"><strong>Shared with me</strong></div>
-        <ul id="handoffShared" class="list"></ul>
-        <div style="margin-top: 6px;"><strong>Blocked / stale</strong></div>
-        <ul id="handoffBlocked" class="list"></ul>
-      </section>
+        <section class="card">
+          <h3>Health</h3>
+          <ul id="healthList" class="list"></ul>
+        </section>
 
-      <section class="card">
-        <h3>Tracker</h3>
-        <dl class="kv">
-          <dt>Last agent</dt><dd id="lastAgent">-</dd>
-          <dt>Last date</dt><dd id="lastDate">-</dd>
-          <dt>Branch</dt><dd id="branch">-</dd>
-          <dt>Commit</dt><dd id="commit">-</dd>
-        </dl>
-      </section>
+        <section class="card">
+          <h3>Handoffs</h3>
+          <div><strong>Assigned to me</strong></div>
+          <ul id="handoffAssigned" class="list"></ul>
+          <div style="margin-top: 6px;"><strong>Shared with me</strong></div>
+          <ul id="handoffShared" class="list"></ul>
+          <div style="margin-top: 6px;"><strong>Blocked / stale</strong></div>
+          <ul id="handoffBlocked" class="list"></ul>
+        </section>
 
-      <section class="card">
-        <h3>Warnings</h3>
-        <ul id="warningsList" class="list"></ul>
-      </section>
+        <section class="card">
+          <h3>Tracker</h3>
+          <dl class="kv">
+            <dt>Last agent</dt><dd id="lastAgent">-</dd>
+            <dt>Last date</dt><dd id="lastDate">-</dd>
+            <dt>Branch</dt><dd id="branch">-</dd>
+            <dt>Commit</dt><dd id="commit">-</dd>
+          </dl>
+        </section>
+
+        <section class="card">
+          <h3>Warnings</h3>
+          <ul id="warningsList" class="list"></ul>
+        </section>
+      </div>
+      <div class="hint">Tip: this live view auto-refreshes from AgentTracker + .agentsync files.</div>
     </div>
-    <div class="hint">Tip: this live view auto-refreshes from AgentTracker + .agentsync files.</div>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     let pendingCommand = null;
     let lastActionAt = null;
+    let currentViewMode = 'compact';
+    let compactMoreOpen = false;
 
     const commandLabels = {
       'agentsync.init': 'Initialize Workspace',
@@ -1714,6 +2512,16 @@ function getDashboardHtml() {
       'agentsync.openHandoffs': 'Open Handoffs JSON',
       'agentsync.openTutorial': 'Open Interactive Tutorial',
       'agentsync.refreshPanel': 'Refresh'
+    };
+    const commandColors = {
+      'agentsync.init': '#4fb3ff',
+      'agentsync.startSession': '#1fd678',
+      'agentsync.endSession': '#ffb347',
+      'agentsync.clearActiveSession': '#ff6c74',
+      'agentsync.openTracker': '#8ab4ff',
+      'agentsync.openHandoffs': '#8ab4ff',
+      'agentsync.openTutorial': '#8ab4ff',
+      'agentsync.refreshPanel': '#3dd6d0'
     };
 
     function byId(id) {
@@ -1730,6 +2538,79 @@ function getDashboardHtml() {
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return '-';
       return date.toLocaleTimeString();
+    }
+
+    function normalizeMode(mode) {
+      return mode === 'full' ? 'full' : 'compact';
+    }
+
+    function setViewMode(mode) {
+      currentViewMode = normalizeMode(mode);
+      document.body.dataset.viewMode = currentViewMode;
+      const toggle = byId('modeToggle');
+      if (toggle) {
+        toggle.textContent = currentViewMode === 'compact' ? 'Show Full' : 'Show Compact';
+      }
+    }
+
+    function setCompactMoreOpen(nextOpen) {
+      compactMoreOpen = Boolean(nextOpen);
+      const moreActions = byId('compactMoreActions');
+      if (moreActions) {
+        moreActions.classList.toggle('open', compactMoreOpen);
+      }
+      const toggle = document.querySelector('[data-role="compact-more-toggle"]');
+      if (toggle) {
+        toggle.textContent = compactMoreOpen ? 'Less' : 'More';
+      }
+    }
+
+    function toRgba(hex, alpha) {
+      const normalized = String(hex || '').trim().replace('#', '');
+      if (!/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(normalized)) {
+        return 'rgba(200, 210, 216, ' + alpha + ')';
+      }
+      const expanded = normalized.length === 3
+        ? normalized.split('').map((c) => c + c).join('')
+        : normalized;
+      const r = parseInt(expanded.slice(0, 2), 16);
+      const g = parseInt(expanded.slice(2, 4), 16);
+      const b = parseInt(expanded.slice(4, 6), 16);
+      return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
+    }
+
+    function getCommandColor(command) {
+      return commandColors[command] || '#c8d2d8';
+    }
+
+    function clearActiveCommandHighlight() {
+      const highlighted = document.querySelectorAll('button.action.active-command, button.recovery-action.active-command');
+      highlighted.forEach((button) => {
+        button.classList.remove('active-command');
+        button.style.removeProperty('--active-command-color');
+        button.style.removeProperty('--active-command-bg');
+      });
+    }
+
+    function setActiveCommandHighlight(command) {
+      clearActiveCommandHighlight();
+      const color = getCommandColor(command);
+      const tint = toRgba(color, 0.18);
+      const targets = document.querySelectorAll('[data-command="' + command + '"]');
+      targets.forEach((target) => {
+        if (!(target instanceof HTMLElement)) return;
+        if (!target.matches('button.action, button.recovery-action')) return;
+        target.classList.add('active-command');
+        target.style.setProperty('--active-command-color', color);
+        target.style.setProperty('--active-command-bg', tint);
+      });
+    }
+
+    function formatCompactTask(value) {
+      const text = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!text) return '-';
+      if (text.length <= 90) return text;
+      return text.slice(0, 89) + '...';
     }
 
     function setActionVisual(state, title, detail) {
@@ -1751,18 +2632,13 @@ function getDashboardHtml() {
     }
 
     function setActionsBusy(isBusy) {
-      const container = document.querySelector('.actions');
-      if (!container) return;
-      container.classList.toggle('busy', isBusy);
-      const buttons = container.querySelectorAll('button.action');
-      buttons.forEach((button) => {
-        const command = button.getAttribute('data-command');
-        const keepEnabled = command === 'agentsync.refreshPanel';
-        button.disabled = isBusy && !keepEnabled;
+      const actionContainers = document.querySelectorAll('.actions, .compact-actions, .compact-more-actions');
+      actionContainers.forEach((container) => {
+        container.classList.toggle('busy', Boolean(isBusy));
       });
 
-      const recoveryButtons = document.querySelectorAll('button.recovery-action');
-      recoveryButtons.forEach((button) => {
+      const buttons = document.querySelectorAll('button.action[data-command], button.recovery-action[data-command]');
+      buttons.forEach((button) => {
         const command = button.getAttribute('data-command');
         const keepEnabled = command === 'agentsync.refreshPanel';
         button.disabled = isBusy && !keepEnabled;
@@ -1818,6 +2694,17 @@ function getDashboardHtml() {
       return item.id + ' | ' + item.summary + ' (' + item.status + ', ' + item.mode + ')';
     }
 
+    function renderCompactSummary(compactModel) {
+      setText('compactFocus', compactModel.focusText || 'No active goal');
+      const compactTasks = Array.isArray(compactModel.tasks) ? compactModel.tasks : [];
+      renderList('compactTasks', compactTasks, (item) => formatCompactTask(item), 'No in-progress tasks');
+      const count = Number(compactModel.extraTaskCount) || 0;
+      const countEl = byId('compactMoreCount');
+      if (countEl) {
+        countEl.textContent = count > 0 ? '+' + count + ' more task' + (count === 1 ? '' : 's') : '';
+      }
+    }
+
     function renderOnboarding(onboarding) {
       const el = byId('onboardingList');
       if (!el) return;
@@ -1870,10 +2757,19 @@ function getDashboardHtml() {
 
     function render(model) {
       if (!model || !model.hasWorkspace) {
+        setViewMode('compact');
+        setCompactMoreOpen(false);
+        clearActiveCommandHighlight();
+        setActionsBusy(false);
         setText('stateText', 'No workspace open');
         setText('nextStep', 'Open a folder/workspace to use AgentSync.');
+        setText('compactFocus', 'No workspace open');
+        renderList('compactTasks', [], (item) => formatCompactTask(item), 'No in-progress tasks');
+        setText('compactMoreCount', '');
         return;
       }
+
+      setViewMode(model.ui && model.ui.viewMode);
 
       document.body.dataset.state = model.state.key;
       const badge = byId('stateBadge');
@@ -1890,6 +2786,7 @@ function getDashboardHtml() {
       setText('inProgressCount', model.inProgress.length);
       setText('nextStep', model.nextStep || '-');
       setText('dataRefreshed', formatTime(model.refreshedAt));
+      renderCompactSummary(model.compact || {});
 
       setText('sessionActive', model.session.active ? 'Yes' : 'No');
       setText('sessionAgent', model.session.agent);
@@ -1909,6 +2806,7 @@ function getDashboardHtml() {
       renderList('warningsList', model.warnings, (w) => w, 'No warnings');
 
       if (!pendingCommand) {
+        clearActiveCommandHighlight();
         const statusLabel = model.state && model.state.label ? model.state.label : 'Idle';
         setActionVisual('ok', 'Idle', 'Current state: ' + statusLabel + '.');
         setRecoveryVisible(false);
@@ -1927,6 +2825,7 @@ function getDashboardHtml() {
         if (stage === 'started') {
           pendingCommand = command;
           setActionsBusy(true);
+          setActiveCommandHighlight(command);
           setActionVisual(
             'running',
             'Running: ' + label,
@@ -1939,6 +2838,7 @@ function getDashboardHtml() {
         if (stage === 'completed') {
           pendingCommand = null;
           setActionsBusy(false);
+          clearActiveCommandHighlight();
           setActionVisual('ok', 'Completed: ' + label, 'Action finished successfully.');
           setRecoveryVisible(false);
           return;
@@ -1947,6 +2847,7 @@ function getDashboardHtml() {
         if (stage === 'failed') {
           pendingCommand = null;
           setActionsBusy(false);
+          clearActiveCommandHighlight();
           setActionVisual('error', 'Failed: ' + label, getFailureHint(command, msg.error || ''));
           setRecoveryVisible(true);
         }
@@ -1954,6 +2855,19 @@ function getDashboardHtml() {
     });
 
     document.addEventListener('click', (event) => {
+      const modeToggle = event.target.closest('[data-role="mode-toggle"]');
+      if (modeToggle) {
+        const next = currentViewMode === 'compact' ? 'full' : 'compact';
+        vscode.postMessage({ type: 'ui', action: 'setMode', mode: next });
+        return;
+      }
+
+      const moreToggle = event.target.closest('[data-role="compact-more-toggle"]');
+      if (moreToggle) {
+        setCompactMoreOpen(!compactMoreOpen);
+        return;
+      }
+
       const target = event.target.closest('[data-command]');
       if (!target) return;
       const command = target.getAttribute('data-command');
@@ -1998,18 +2912,52 @@ function getDashboardHtml() {
       setInterval(draw, 60);
     })();
 
+    setViewMode('compact');
+    setCompactMoreOpen(false);
     vscode.postMessage({ command: 'agentsync.refreshPanel' });
   </script>
 </body>
 </html>`
 }
-
 /**
  * Webview provider for the animated AgentSync Live dashboard.
  */
 class AgentSyncDashboardViewProvider {
-  constructor() {
+  /**
+   * @param {vscode.ExtensionContext} context
+   */
+  constructor(context) {
+    this.context = context
     this.view = null
+  }
+
+  /**
+   * @param {vscode.WorkspaceFolder} workspaceFolder
+   * @returns {string}
+   */
+  getViewModeKey(workspaceFolder) {
+    return `agentsync.dashboard.viewMode::${workspaceFolder.uri.fsPath}`
+  }
+
+  /**
+   * @param {vscode.WorkspaceFolder} workspaceFolder
+   * @returns {'compact' | 'full'}
+   */
+  getViewMode(workspaceFolder) {
+    const key = this.getViewModeKey(workspaceFolder)
+    const stored = String(this.context.workspaceState.get(key, 'compact'))
+    return stored === 'full' ? 'full' : 'compact'
+  }
+
+  /**
+   * @param {vscode.WorkspaceFolder} workspaceFolder
+   * @param {string} mode
+   * @returns {Promise<void>}
+   */
+  async setViewMode(workspaceFolder, mode) {
+    const normalized = mode === 'full' ? 'full' : 'compact'
+    const key = this.getViewModeKey(workspaceFolder)
+    await this.context.workspaceState.update(key, normalized)
   }
 
   postAction(stage, command, error = null) {
@@ -2030,7 +2978,8 @@ class AgentSyncDashboardViewProvider {
       this.view.webview.postMessage({ type: 'model', model: { hasWorkspace: false } })
       return
     }
-    this.view.webview.postMessage({ type: 'model', model: getDashboardModel(workspaceFolder) })
+    const viewMode = this.getViewMode(workspaceFolder)
+    this.view.webview.postMessage({ type: 'model', model: getDashboardModel(workspaceFolder, viewMode) })
   }
 
   /**
@@ -2042,6 +2991,17 @@ class AgentSyncDashboardViewProvider {
     webviewView.webview.html = getDashboardHtml()
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
+      if (message?.type === 'ui' && message?.action === 'setMode') {
+        const workspaceFolder = getActiveWorkspaceFolder()
+        if (!workspaceFolder) return
+        const mode = String(message?.mode || '')
+        if (mode === 'compact' || mode === 'full') {
+          await this.setViewMode(workspaceFolder, mode)
+          this.refresh()
+        }
+        return
+      }
+
       const command = String(message?.command || '')
       if (!command) return
       if (command === 'agentsync.refreshPanel') {
@@ -2450,7 +3410,7 @@ class AgentSyncTreeDataProvider {
   }
 }
 
-// ─── Status bar ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Format text prefix for multi-root workspaces.
@@ -2535,7 +3495,7 @@ function updateStatusBar(statusItem) {
       tooltipLines.push('', 'Warnings:')
       warnings.forEach((warning) => tooltipLines.push(`- ${warning}`))
     }
-    tooltipLines.push('', 'Click to open AgentTracker')
+    tooltipLines.push('', 'Click to open AgentSync Live')
     statusItem.tooltip = tooltipLines.join('\n')
   } catch {
     statusItem.text = `$(sync) ${prefix}AgentSync`
@@ -2545,7 +3505,7 @@ function updateStatusBar(statusItem) {
   statusItem.show()
 }
 
-// ─── Commands ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Initialize the workspace with AgentSync protocol files.
@@ -2802,137 +3762,264 @@ async function endSession(context) {
   }
 
   const parsed = parseTracker(content)
-  const agent = await promptForAgent(parsed.agent)
-  if (!agent) return
+  const config = readAgentSyncConfig(workspaceFolder)
+  const zeroTouchCfg = config.automation?.endSessionZeroTouch || DEFAULT_END_SESSION_ZERO_TOUCH
+  const zeroTouchEnabled = zeroTouchCfg.enabled === true
 
-  const summary = await vscode.window.showInputBox({
-    prompt: 'One-line session summary',
-    placeHolder: 'Example: Added queue retry logic and fixed race condition'
-  })
-  if (summary === undefined) return
-
-  const nextWork = await vscode.window.showInputBox({
-    prompt: 'Suggested next work (optional)',
-    placeHolder: 'Leave empty to keep existing notes'
-  })
-  if (nextWork === undefined) return
-
-  // Detect hot files early so we can offer handoff prompts
-  const hotFiles = detectHotFiles(workspaceFolder)
+  let agent = ''
+  let summary = ''
+  let nextWork = ''
   let handoffData = null
+  let summarySource = 'user'
+  let automationUsed = false
+  let automationContext = null
+  let goalHint = null
+  let precomputedHotFiles = null
+  let precomputedHealth = null
+  let precomputedHealthOutputs = null
 
-  if (hotFiles.length > 0) {
-    const modeChoice = await vscode.window.showQuickPick(
-      [
-        { label: 'Single owner', description: 'Hand off to one agent', value: 'single' },
-        { label: 'Shared owners', description: 'Two agents co-own the next step', value: 'shared' },
-        { label: 'Auto-route', description: 'System picks owner(s) from capabilities', value: 'auto' },
-        { label: 'Skip (enter reason)', description: 'No handoff — record reason instead', value: 'skip' }
-      ],
-      { placeHolder: `${hotFiles.length} hot file(s) detected. Add a handoff note?`, ignoreFocusOut: true }
-    )
-    if (modeChoice === undefined) return
+  if (zeroTouchEnabled) {
+    const state = readStateFile(workspaceFolder) || {}
+    const activeSessionAgent =
+      state?.sessionActive && toSingleLine(state?.activeSession?.agent)
+        ? toSingleLine(state.activeSession.agent)
+        : ''
 
-    if (modeChoice.value === 'skip') {
-      const skipReason = await vscode.window.showInputBox({
-        prompt: 'Why are you skipping the handoff? (required)',
-        placeHolder: 'Example: Solo branch, no review needed yet',
-        ignoreFocusOut: true,
-        validateInput: (v) => (v && v.trim() ? null : 'Reason cannot be empty')
-      })
-      if (skipReason === undefined) return
-      handoffData = { no_handoff_reason: skipReason.trim() }
+    if (activeSessionAgent) {
+      agent = activeSessionAgent
     } else {
-      let toAgents = []
-      let requiredCapabilities = []
+      agent = await promptForAgent(parsed.agent)
+      if (!agent) return
+    }
 
-      if (modeChoice.value === 'single') {
-        const toInput = await vscode.window.showInputBox({
-          prompt: 'Target agent name (e.g. claude)',
-          placeHolder: 'claude',
-          ignoreFocusOut: true,
-          validateInput: (v) => (v && v.trim() ? null : 'Agent name cannot be empty')
-        })
-        if (toInput === undefined) return
-        toAgents = [toInput.trim()]
-      } else if (modeChoice.value === 'shared') {
-        const toInput = await vscode.window.showInputBox({
-          prompt: 'Two agent names, comma-separated (e.g. claude, copilot)',
-          placeHolder: 'claude, copilot',
-          ignoreFocusOut: true,
-          validateInput: (v) => {
-            const parts = (v || '').split(',').map((s) => s.trim()).filter(Boolean)
-            return parts.length === 2 ? null : 'Enter exactly 2 agent names separated by a comma'
-          }
-        })
-        if (toInput === undefined) return
-        toAgents = toInput.split(',').map((s) => s.trim()).filter(Boolean)
-      } else if (modeChoice.value === 'auto') {
-        const capsInput = await vscode.window.showInputBox({
-          prompt: 'Required capabilities, comma-separated (e.g. policy_review, pr_review)',
-          placeHolder: 'policy_review, pr_review',
-          ignoreFocusOut: true,
-          validateInput: (v) => {
-            const parts = (v || '').split(',').map((s) => s.trim()).filter(Boolean)
-            return parts.length > 0 ? null : 'Enter at least one capability'
-          }
-        })
-        if (capsInput === undefined) return
-        requiredCapabilities = capsInput.split(',').map((s) => s.trim()).filter(Boolean)
+    goalHint = toSingleLine(state?.activeSession?.goal || '') || null
+    precomputedHotFiles = detectHotFiles(workspaceFolder)
+    const checks = await runHealthChecks(workspaceFolder)
+    precomputedHealth = checks.results
+    precomputedHealthOutputs = checks.outputs
+
+    const generatedSummary = buildDeterministicSessionSummary({
+      goal: goalHint || '',
+      hotFiles: precomputedHotFiles,
+      health: precomputedHealth,
+      maxSummaryLength: zeroTouchCfg.maxSummaryLength
+    })
+
+    const summaryInput = await vscode.window.showInputBox({
+      prompt: 'One-line session summary (auto-generated; edit if needed)',
+      value: generatedSummary,
+      ignoreFocusOut: true
+    })
+    if (summaryInput === undefined) return
+
+    summary = toSingleLine(summaryInput) || generatedSummary
+    summarySource = summary === generatedSummary ? 'deterministic' : 'user'
+    automationUsed = true
+
+    if (precomputedHotFiles.length > 0) {
+      const route = resolveAutomationRoute(config, agent)
+      if (route) {
+        automationContext = 'default:' + canonicalAgentId(agent)
+        handoffData = {
+          summary,
+          notes: buildAutomationHandoffNotes({
+            summary,
+            hotFiles: precomputedHotFiles,
+            health: precomputedHealth,
+            sourceAgent: agent
+          }),
+          owner_mode: route.owner_mode,
+          to_agents: route.to_agents,
+          required_capabilities: route.required_capabilities,
+          no_handoff_reason: null,
+          automation_context: automationContext
+        }
+      } else {
+        const fallback = await promptAutomationFallbackRouting(precomputedHotFiles.length)
+        if (!fallback) return
+        handoffData = fallback.handoffData
+        automationContext = fallback.automationContext || null
+
+        if (!handoffData.no_handoff_reason) {
+          handoffData.summary = summary
+          handoffData.notes = buildAutomationHandoffNotes({
+            summary,
+            hotFiles: precomputedHotFiles,
+            health: precomputedHealth,
+            sourceAgent: agent
+          })
+          handoffData.automation_context = automationContext
+        }
       }
+    }
+  } else {
+    agent = await promptForAgent(parsed.agent)
+    if (!agent) return
 
-      const handoffSummary = await vscode.window.showInputBox({
-        prompt: 'Handoff summary (what does the next agent need to do?)',
-        value: summary,
-        ignoreFocusOut: true
-      })
-      if (handoffSummary === undefined) return
+    const summaryInput = await vscode.window.showInputBox({
+      prompt: 'One-line session summary',
+      placeHolder: 'Example: Added queue retry logic and fixed race condition'
+    })
+    if (summaryInput === undefined) return
+    summary = summaryInput
 
-      const handoffNotes = await vscode.window.showInputBox({
-        prompt: 'Additional notes for the next agent (optional)',
-        placeHolder: 'Example: Check regression risk in token refresh path before merge.',
-        ignoreFocusOut: true
-      })
-      if (handoffNotes === undefined) return
+    const nextWorkInput = await vscode.window.showInputBox({
+      prompt: 'Suggested next work (optional)',
+      placeHolder: 'Leave empty to keep existing notes'
+    })
+    if (nextWorkInput === undefined) return
+    nextWork = nextWorkInput
 
-      handoffData = {
-        summary: handoffSummary.trim() || summary,
-        notes: handoffNotes.trim(),
-        owner_mode: modeChoice.value,
-        to_agents: toAgents,
-        required_capabilities: requiredCapabilities,
-        no_handoff_reason: null
+    // Detect hot files early so we can offer handoff prompts
+    const hotFiles = detectHotFiles(workspaceFolder)
+    if (hotFiles.length > 0) {
+      const modeChoice = await vscode.window.showQuickPick(
+        [
+          { label: 'Single owner', description: 'Hand off to one agent', value: 'single' },
+          { label: 'Shared owners', description: 'Two agents co-own the next step', value: 'shared' },
+          { label: 'Auto-route', description: 'System picks owner(s) from capabilities', value: 'auto' },
+          { label: 'Skip (enter reason)', description: 'No handoff - record reason instead', value: 'skip' }
+        ],
+        { placeHolder: hotFiles.length + ' hot file(s) detected. Add a handoff note?', ignoreFocusOut: true }
+      )
+      if (modeChoice === undefined) return
+
+      if (modeChoice.value === 'skip') {
+        const skipReason = await vscode.window.showInputBox({
+          prompt: 'Why are you skipping the handoff? (required)',
+          placeHolder: 'Example: Solo branch, no review needed yet',
+          ignoreFocusOut: true,
+          validateInput: (v) => (v && v.trim() ? null : 'Reason cannot be empty')
+        })
+        if (skipReason === undefined) return
+        handoffData = { no_handoff_reason: skipReason.trim() }
+      } else {
+        let toAgents = []
+        let requiredCapabilities = []
+
+        if (modeChoice.value === 'single') {
+          const toInput = await vscode.window.showInputBox({
+            prompt: 'Target agent name (e.g. claude)',
+            placeHolder: 'claude',
+            ignoreFocusOut: true,
+            validateInput: (v) => (v && v.trim() ? null : 'Agent name cannot be empty')
+          })
+          if (toInput === undefined) return
+          toAgents = [toInput.trim()]
+        } else if (modeChoice.value === 'shared') {
+          const toInput = await vscode.window.showInputBox({
+            prompt: 'Two agent names, comma-separated (e.g. claude, copilot)',
+            placeHolder: 'claude, copilot',
+            ignoreFocusOut: true,
+            validateInput: (v) => {
+              const parts = (v || '').split(',').map((s) => s.trim()).filter(Boolean)
+              return parts.length === 2 ? null : 'Enter exactly 2 agent names separated by a comma'
+            }
+          })
+          if (toInput === undefined) return
+          toAgents = toInput.split(',').map((s) => s.trim()).filter(Boolean)
+        } else if (modeChoice.value === 'auto') {
+          const capsInput = await vscode.window.showInputBox({
+            prompt: 'Required capabilities, comma-separated (e.g. policy_review, pr_review)',
+            placeHolder: 'policy_review, pr_review',
+            ignoreFocusOut: true,
+            validateInput: (v) => {
+              const parts = (v || '').split(',').map((s) => s.trim()).filter(Boolean)
+              return parts.length > 0 ? null : 'Enter at least one capability'
+            }
+          })
+          if (capsInput === undefined) return
+          requiredCapabilities = capsInput.split(',').map((s) => s.trim()).filter(Boolean)
+        }
+
+        const handoffSummary = await vscode.window.showInputBox({
+          prompt: 'Handoff summary (what does the next agent need to do?)',
+          value: summary,
+          ignoreFocusOut: true
+        })
+        if (handoffSummary === undefined) return
+
+        const handoffNotes = await vscode.window.showInputBox({
+          prompt: 'Additional notes for the next agent (optional)',
+          placeHolder: 'Example: Check regression risk in token refresh path before merge.',
+          ignoreFocusOut: true
+        })
+        if (handoffNotes === undefined) return
+
+        handoffData = {
+          summary: handoffSummary.trim() || summary,
+          notes: handoffNotes.trim(),
+          owner_mode: modeChoice.value,
+          to_agents: toAgents,
+          required_capabilities: requiredCapabilities,
+          no_handoff_reason: null
+        }
       }
     }
   }
 
-  let health
+  let result
   try {
-    const result = endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData)
-    health = result.health
+    // M1/C4: endSessionCore is async (non-blocking health checks)
+    result = await endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData, {
+      hotFiles: precomputedHotFiles,
+      healthResults: precomputedHealth,
+      healthOutputs: precomputedHealthOutputs,
+      summarySource,
+      automationUsed,
+      automationContext,
+      goalHint
+    })
   } catch (err) {
-    vscode.window.showErrorMessage(`AgentSync: ${err.message}`)
+    vscode.window.showErrorMessage('AgentSync: ' + err.message)
     return
+  }
+
+  let promptCopiedToClipboard = false
+  if (
+    zeroTouchEnabled &&
+    zeroTouchCfg.copyPromptToClipboard &&
+    Array.isArray(result.handoffPrompts) &&
+    result.handoffPrompts.length > 0
+  ) {
+    try {
+      promptCopiedToClipboard = await copyHandoffPromptToClipboard(result.handoffPrompts)
+      if (promptCopiedToClipboard && result.handoff?.handoff_id) {
+        updateHandoffPromptCopiedFlag(workspaceFolder, result.handoff.handoff_id, true)
+      }
+    } catch {
+      promptCopiedToClipboard = false
+    }
   }
 
   await openTrackerDocument(workspaceFolder)
 
-  const failedChecks = Object.values(health).filter((status) => status === 'Fail').length
-  const handoffMsg = handoffData
-    ? handoffData.no_handoff_reason
+  const failedChecks = Object.values(result.health || {}).filter((status) => status === 'Fail').length
+  const handoffMsg = result.handoff
+    ? result.handoff.no_handoff_reason
       ? ' Handoff skipped (reason recorded).'
       : ' Handoff note created.'
     : ''
-  const summaryMessage =
+
+  let summaryMessage =
     failedChecks > 0
-      ? `AgentSync: Session ended. ${failedChecks} health check(s) failed.${handoffMsg}`
-      : `AgentSync: Session ended and tracker updated.${handoffMsg}`
+      ? 'AgentSync: Session ended. ' + failedChecks + ' health check(s) failed.' + handoffMsg
+      : 'AgentSync: Session ended and tracker updated.' + handoffMsg
+
+  if (zeroTouchEnabled) {
+    const summarySourceMsg =
+      result.summarySource === 'deterministic' ? ' Summary auto-generated.' : ' Summary confirmed/edited.'
+    const promptMsg =
+      Array.isArray(result.handoffPrompts) && result.handoffPrompts.length > 0
+        ? promptCopiedToClipboard
+          ? ' Handoff prompt copied to clipboard.'
+          : ' Handoff prompt generated (not copied).'
+        : ''
+    summaryMessage += summarySourceMsg + promptMsg
+  }
 
   vscode.window.showInformationMessage(summaryMessage)
 }
-
-// ─── Automation helpers ───────────────────────────────────────────────────────
-
 /**
  * Scan the workspace's package.json for build/test/deploy scripts and offer to
  * populate .agentsync.json commands. Called automatically during initWorkspace
@@ -3006,7 +4093,7 @@ async function autoDetectCommands(workspaceFolder, options = {}) {
     .join(', ')
 
   const choice = await vscode.window.showInformationMessage(
-    `AgentSync: Detected scripts in "${workspaceFolder.name}" — ${detectedList}. Populate .agentsync.json?`,
+    `AgentSync: Detected scripts in "${workspaceFolder.name}" â€” ${detectedList}. Populate .agentsync.json?`,
     'Yes',
     'Skip'
   )
@@ -3049,10 +4136,11 @@ async function checkSessionOnStartup(_context) {
     if (!state.sessionActive || !state.activeSession) continue
 
     const { agent, goal, startedAt } = state.activeSession
-    const ageMs = Date.now() - Date.parse(startedAt)
+    // M5: use strict ISO parser
+    const ageMs = Date.now() - (parseISODate(startedAt) || Date.now())
     const ageHours = Math.floor(ageMs / (60 * 60 * 1000))
     const ageLabel = ageHours >= 1 ? `${ageHours}h ago` : 'recently'
-    const goalLabel = goal ? ` — "${goal}"` : ''
+    const goalLabel = goal ? ` â€” "${goal}"` : ''
 
     const choice = await vscode.window.showInformationMessage(
       `AgentSync: ${agent} has an active session in "${folder.name}" (started ${ageLabel}${goalLabel}).`,
@@ -3061,7 +4149,10 @@ async function checkSessionOnStartup(_context) {
     )
 
     if (choice === 'End Session') {
-      await vscode.commands.executeCommand('agentsync.endSession')
+      // H3: catch so an unexpected executeCommand failure doesn't become an unhandled rejection
+      await vscode.commands.executeCommand('agentsync.endSession').catch((err) => {
+        console.error('[AgentSync] checkSessionOnStartup executeCommand error:', err)
+      })
     }
   }
 }
@@ -3101,7 +4192,10 @@ function startSessionReminderTimer(context) {
       const sessionKey = `${folder.uri.fsPath}::${state.activeSession.startedAt}`
       if (reminded.has(sessionKey)) continue
 
-      const ageMs = Date.now() - Date.parse(state.activeSession.startedAt)
+      // M5: use strict ISO parser
+      const started = parseISODate(state.activeSession.startedAt)
+      if (!Number.isFinite(started)) continue
+      const ageMs = Date.now() - started
       const ageHours = ageMs / (60 * 60 * 1000)
       if (ageHours < reminderHours) continue
 
@@ -3116,7 +4210,10 @@ function startSessionReminderTimer(context) {
         )
         .then((choice) => {
           if (choice === 'End Session') {
-            vscode.commands.executeCommand('agentsync.endSession')
+            // H3: catch so rejection from executeCommand doesn't become unhandled
+            vscode.commands.executeCommand('agentsync.endSession').catch((err) => {
+              console.error('[AgentSync] reminder timer executeCommand error:', err)
+            })
           }
         })
     }
@@ -3125,23 +4222,23 @@ function startSessionReminderTimer(context) {
   context.subscriptions.push({ dispose: () => clearInterval(timer) })
 }
 
-// ─── Extension lifecycle ──────────────────────────────────────────────────────
+// â”€â”€â”€ Extension lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
-  // ── Status bar ──
+  // â”€â”€ Status bar â”€â”€
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99)
-  statusItem.command = 'agentsync.openTracker'
+  statusItem.command = 'agentsync.openDashboard'
   updateStatusBar(statusItem)
 
-  const dashboardProvider = new AgentSyncDashboardViewProvider()
+  const dashboardProvider = new AgentSyncDashboardViewProvider(context)
   const dashboardView = vscode.window.registerWebviewViewProvider('agentsync.dashboard', dashboardProvider, {
     webviewOptions: { retainContextWhenHidden: true }
   })
 
-  // ── Tree view ──
+  // â”€â”€ Tree view â”€â”€
   const treeProvider = new AgentSyncTreeDataProvider()
   const treeView = vscode.window.createTreeView('agentsync.panel', {
     treeDataProvider: treeProvider,
@@ -3154,7 +4251,7 @@ function activate(context) {
     dashboardProvider.refresh()
   }
 
-  // ── File watchers ──
+  // â”€â”€ File watchers â”€â”€
   const trackerWatcher = vscode.workspace.createFileSystemWatcher('**/AgentTracker.md')
   trackerWatcher.onDidChange(refresh)
   trackerWatcher.onDidCreate(refresh)
@@ -3171,7 +4268,7 @@ function activate(context) {
   handoffsWatcher.onDidDelete(refresh)
 
   // state.json is written after AgentTracker.md on session changes, but the
-  // drop-zone API writes it independently — watch it to keep the panel live.
+  // drop-zone API writes it independently â€” watch it to keep the panel live.
   const stateWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync/state.json')
   stateWatcher.onDidChange(refresh)
   stateWatcher.onDidCreate(refresh)
@@ -3208,7 +4305,7 @@ function activate(context) {
     refresh()
   }, 2000)
 
-  // ── Commands ──
+  // â”€â”€ Commands â”€â”€
   const initCmd = vscode.commands.registerCommand('agentsync.init', () => initWorkspace(context))
   const openCmd = vscode.commands.registerCommand('agentsync.openTracker', () => openTracker(context))
   const openDashboardCmd = vscode.commands.registerCommand('agentsync.openDashboard', async () => {
@@ -3259,7 +4356,7 @@ function activate(context) {
     refresh()
   })
 
-  // ── Startup automation ──
+  // â”€â”€ Startup automation â”€â”€
   setTimeout(() => checkSessionOnStartup(context), 3000)
   startSessionReminderTimer(context)
 
