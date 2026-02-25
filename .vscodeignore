@@ -3,6 +3,8 @@
 *.vsix
 node_modules/**
 agent-matrix-theme/**
+agentsync/**
+Audit Report.md
 .git/**
 .claude/**
 .eslintrc.json

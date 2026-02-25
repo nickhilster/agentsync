@@ -2,6 +2,15 @@
 
 All notable changes to AgentSync are documented here.
 
+## [0.3.4] - 2026-02-25
+
+### Fixed
+
+- **Release trigger pattern** - corrected `.github/workflows/release.yml` tag matching so standard `vX.Y.Z` tags trigger the release pipeline.
+- **Safe default deploy health check** - set `.agentsync.json` `commands.deploy` to empty by default to avoid failed End Session health checks in local environments without publish credentials.
+- **Cross-platform version bump scripts** - replaced bash-based bump commands with a Node-based script so `npm run bump:*` works on Windows and Unix hosts.
+- **Local Jest collision warning** - added `modulePathIgnorePatterns` in `jest.config.js` to ignore nested local clones (for example `agentsync/`) and prevent duplicate package-name warnings.
+
 ## [0.3.3] - 2026-02-24
 
 ### Added

@@ -3,6 +3,7 @@
 module.exports = {
   testEnvironment: 'node',
   testMatch: ['<rootDir>/test/**/*.test.js'],
+  modulePathIgnorePatterns: ['<rootDir>/agentsync/'],
   moduleNameMapper: {
     vscode: '<rootDir>/__mocks__/vscode.js'
   },
