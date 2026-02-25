@@ -1,0 +1,29 @@
+{
+  "env": {
+    "node": true,
+    "es2020": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "commonjs"
+  },
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-console": "off",
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "prefer-const": "error",
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+    "no-var": "error",
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-useless-escape": "warn"
+  },
+  "ignorePatterns": ["node_modules/", "*.vsix", "agentsync-local.vsix", "coverage/"],
+  "overrides": [
+    {
+      "files": ["test/**/*.js", "__mocks__/**/*.js"],
+      "env": {
+        "jest": true
+      }
+    }
+  ]
+}
