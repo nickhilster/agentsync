@@ -3,6 +3,8 @@
 *.vsix
 node_modules/**
 agent-matrix-theme/**
+.git/**
+.claude/**
 .eslintrc.json
 .prettierrc.json
 .prettierignore

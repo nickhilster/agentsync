@@ -2,5 +2,7 @@
 node_modules
 .vscode/
 agent-matrix-theme/
+.claude/
+agentsync/
 .husky/_/
 coverage/
