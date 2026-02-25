@@ -1,8 +1,8 @@
 {
   "staleAfterHours": 24,
   "commands": {
-    "build": "",
-    "test": "",
-    "deploy": ""
+    "build": "npm run vsix:package",
+    "test": "npm test",
+    "deploy": "npx @vscode/vsce publish"
   }
 }

@@ -1,0 +1,7 @@
+node_modules/
+*.vsix
+agentsync-local.vsix
+CHANGELOG.md
+*.md
+templates/
+coverage/

@@ -29,7 +29,9 @@ function printHelp() {
   console.log('  --help              Show this help message')
   console.log('')
   console.log('Environment variables:')
-  console.log('  CODE_CLI            Explicit VS Code CLI command/path (ex: code, code-insiders, C:\\...\\code.cmd)')
+  console.log(
+    '  CODE_CLI            Explicit VS Code CLI command/path (ex: code, code-insiders, C:\\...\\code.cmd)'
+  )
 }
 
 function run(command, args, options = {}) {
@@ -89,7 +91,13 @@ function resolveCodeCli() {
       path.join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code', 'bin', 'code.cmd')
     )
     candidates.push(
-      path.join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code Insiders', 'bin', 'code-insiders.cmd')
+      path.join(
+        process.env.LOCALAPPDATA,
+        'Programs',
+        'Microsoft VS Code Insiders',
+        'bin',
+        'code-insiders.cmd'
+      )
     )
   }
 

@@ -3,3 +3,16 @@
 *.vsix
 node_modules/**
 agent-matrix-theme/**
+.eslintrc.json
+.prettierrc.json
+.prettierignore
+.husky/
+jest.config.js
+__mocks__/
+test/
+coverage/
+package-lock.json
+scripts/
+docs/
+schemas/
+.github/
