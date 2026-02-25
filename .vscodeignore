@@ -1,9 +1,18 @@
 .gitignore
+.agentsync/
+.agentsync/**
+.agentsync.json
 .vscode/**
 *.vsix
 node_modules/**
 agent-matrix-theme/**
 agentsync/**
+AGENTS.md
+AgentTracker.md
+CLAUDE.md
+agent-coordination-questions.md
+claude-answers.md
+codex_agent_questionnaire_answers.md
 Audit Report.md
 .git/**
 .claude/**

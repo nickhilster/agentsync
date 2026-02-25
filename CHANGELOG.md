@@ -2,6 +2,23 @@
 
 All notable changes to AgentSync are documented here.
 
+## [0.3.5] - 2026-02-25
+
+### Added
+
+- **Start Session zero-touch pickup controls** - added `automation.startSessionZeroTouch` config with `enabled`, `autoClaimHandoff`, and `promptPreFill` options to support claim-and-prefill handoff flows.
+- **Queued handoff action cards in AgentSync Live** - dashboard now surfaces queued handoffs assigned to the current agent with in-panel `Claim`, `Start`, and `Skip` actions.
+- **Hot file safety visuals** - added explorer file decorations and on-open warnings for hot files while a session is active.
+
+### Changed
+
+- **State-backed dashboard/session metadata** - dashboard and status bar now prefer `state.json` session snapshots (`lastSession`, `inProgress`, `hotFiles`) over markdown parsing when available for more stable UI state.
+- **VSIX packaging exclusions** - updated `.vscodeignore` to exclude local runtime/protocol coordination files from packaged extension artifacts.
+
+### Fixed
+
+- **Compact dashboard task formatting** - corrected escaped whitespace regex handling inside webview script rendering.
+
 ## [0.3.4] - 2026-02-25
 
 ### Fixed

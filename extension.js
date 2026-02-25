@@ -19,6 +19,11 @@ const DEFAULT_END_SESSION_ZERO_TOUCH = Object.freeze({
   copyPromptToClipboard: true,
   maxSummaryLength: 180
 })
+const DEFAULT_START_SESSION_ZERO_TOUCH = Object.freeze({
+  enabled: false,
+  autoClaimHandoff: false,
+  promptPreFill: true
+})
 const DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
   claude: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] },
   codex: { owner_mode: 'single', to_agents: ['claude'], required_capabilities: [] },
@@ -234,6 +239,11 @@ function readAgentSyncConfig(workspaceFolder) {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : fallback
   }
+  const normalizeStartSessionAutomation = (value = {}) => ({
+    enabled: value.enabled === true,
+    autoClaimHandoff: value.autoClaimHandoff === true,
+    promptPreFill: value.promptPreFill === undefined ? true : value.promptPreFill === true
+  })
   const normalizeEndSessionAutomation = (value = {}) => {
     const maxSummaryLength = Math.max(
       60,
@@ -283,6 +293,9 @@ function readAgentSyncConfig(workspaceFolder) {
   )
   const normalizeAutomation = (automation = {}) => {
     const endSessionZeroTouch = normalizeEndSessionAutomation(automation.endSessionZeroTouch || {})
+    const startSessionZeroTouch = normalizeStartSessionAutomation(
+      automation.startSessionZeroTouch || {}
+    )
     const configured = automation.handoffRoutingDefaults || {}
     const handoffRoutingDefaults = { ...defaultRoutes }
     if (configured && typeof configured === 'object') {
@@ -293,7 +306,7 @@ function readAgentSyncConfig(workspaceFolder) {
         if (normalizedRoute) handoffRoutingDefaults[agentId] = normalizedRoute
       }
     }
-    return { endSessionZeroTouch, handoffRoutingDefaults }
+    return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults }
   }
   const defaults = {
     staleAfterHours: DEFAULT_STALE_HOURS,
@@ -1431,6 +1444,50 @@ function updateHandoffPromptCopiedFlag(workspaceFolder, handoffId, copied) {
   writeHandoffs(workspaceFolder, { version: 1, handoffs: next })
 }
 
+/**
+ * Find the first queued handoff in handoffs.json addressed to a specific agent.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} agentId
+ * @returns {any | null}
+ */
+function findClaimableHandoff(workspaceFolder, agentId) {
+  const canonical = canonicalAgentId(agentId)
+  if (!canonical) return null
+  const { handoffs } = readHandoffs(workspaceFolder)
+  return (
+    handoffs.find((h) => {
+      if (String(h?.status || '').toLowerCase() !== 'queued') return false
+      const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : []
+      return owners.includes(canonical)
+    }) || null
+  )
+}
+
+/**
+ * Claim a handoff record — set status to in_progress and append a state_history entry.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} handoffId
+ * @param {string} agentId
+ */
+function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
+  const store = readHandoffs(workspaceFolder)
+  const now = new Date().toISOString()
+  const canonical = canonicalAgentId(agentId)
+  const updated = store.handoffs.map((h) => {
+    if (toSingleLine(h?.handoff_id) !== handoffId) return h
+    return {
+      ...h,
+      status: 'in_progress',
+      updated_at: now,
+      state_history: [
+        ...(Array.isArray(h.state_history) ? h.state_history : []),
+        { status: 'in_progress', agent: canonical, timestamp: now, reason: 'claimed via agentsync' }
+      ]
+    }
+  })
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
+}
+
 // â”€â”€â”€ Core session logic (headless â€” no VS Code UI) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // These functions contain the pure tracker mutation logic.
@@ -1464,6 +1521,23 @@ function startSessionCore(workspaceFolder, agent, goal) {
   const updated = setSectionBody(content, 'In Progress', updatedBody || '*Nothing active*')
   writeTracker(workspaceFolder, updated)
 
+  // Prefer lastSession from existing state.json so structured data survives across sessions.
+  // Fall back to parsing the tracker for workspaces that haven't written state.json yet.
+  const existingState = readStateFile(workspaceFolder) || {}
+  const lastSessionFromState = existingState.lastSession || null
+  const lastSessionFromTracker = isEmptyValue(existingTracker.agent)
+    ? null
+    : {
+        agent: existingTracker.agent,
+        date: existingTracker.date,
+        summary: existingTracker.summary,
+        branch: existingTracker.branch,
+        commit: existingTracker.commit
+      }
+  const lastSession = lastSessionFromState || lastSessionFromTracker
+
+  const updatedInProgressLines = [...currentLines, entry]
+
   writeStateFile(workspaceFolder, {
     sessionActive: true,
     lastUpdated: new Date().toISOString(),
@@ -1472,15 +1546,9 @@ function startSessionCore(workspaceFolder, agent, goal) {
       goal: normalizedGoal,
       startedAt: new Date().toISOString()
     },
-    lastSession: isEmptyValue(existingTracker.agent)
-      ? null
-      : {
-          agent: existingTracker.agent,
-          date: existingTracker.date,
-          summary: existingTracker.summary,
-          branch: existingTracker.branch,
-          commit: existingTracker.commit
-        }
+    lastSession,
+    hotFiles: [],
+    inProgress: updatedInProgressLines
   })
 
   return { agent, goal: normalizedGoal }
@@ -1778,6 +1846,7 @@ async function endSessionCore(
       ])
     ),
     hotFiles,
+    inProgress: remainingInProgress,
     openHandoffCount: openHandoffs.length,
     activeHandoffIds: openHandoffs.map((h) => String(h.handoff_id || h.task_id || ''))
   })
@@ -2052,7 +2121,12 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
 
   const config = readAgentSyncConfig(workspaceFolder)
   const handoffInfo = readHandoffs(workspaceFolder)
-  const inProgressLines = getInProgressLines(trackerContent)
+  // Prefer inProgress from state.json (written by start/end session) over MD parsing.
+  // Fall back to MD parsing for workspaces that haven't written state.json yet.
+  const inProgressLines =
+    Array.isArray(state?.inProgress) && state.inProgress.length > 0
+      ? state.inProgress
+      : getInProgressLines(trackerContent)
   const currentAgentId = canonicalAgentId(
     state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
   )
@@ -2101,11 +2175,29 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
     mode: String(h?.owner_mode || 'unknown'),
     owners: Array.isArray(h?.to_agents) ? h.to_agents : []
   })
+  // Full card data for interactive dashboard actions (Claim / Start / Skip)
+  const summarizeHandoffCard = (h) => {
+    const files = Array.isArray(h?.files) ? h.files : []
+    const toAgents = Array.isArray(h?.to_agents) ? h.to_agents : []
+    return {
+      id: String(h?.handoff_id || h?.task_id || 'unknown'),
+      summary: String(h?.summary || 'No summary'),
+      from_agent: String(h?.from_agent || 'unknown'),
+      to_agents_display: toAgents.join(', ') || 'any',
+      files_display:
+        files.length > 3
+          ? files.slice(0, 3).join(', ') + ' (+' + (files.length - 3) + ' more)'
+          : files.join(', ') || 'none',
+      status: String(h?.status || 'queued'),
+      notes: String(h?.notes || '')
+    }
+  }
   const compactTasks = inProgressLines.slice(0, 2)
   const compactExtraTaskCount = Math.max(0, inProgressLines.length - compactTasks.length)
   const rawSessionGoal = String(state?.activeSession?.goal || '').trim()
   const rawFirstInProgress = String(inProgressLines[0] || '').trim()
-  const rawTrackerSummary = String(tracker.summary || '').trim()
+  // Prefer state.json last session summary over parsing tracker markdown.
+  const rawTrackerSummary = String(state?.lastSession?.summary || tracker.summary || '').trim()
   let focusText = 'No active goal'
   if (!isEmptyValue(rawSessionGoal)) {
     focusText = rawSessionGoal
@@ -2138,11 +2230,11 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
       startedAt: state?.activeSession?.startedAt || null
     },
     tracker: {
-      lastAgent: tracker.agent,
-      lastDate: tracker.date,
-      lastSummary: tracker.summary,
-      branch: tracker.branch,
-      commit: tracker.commit
+      lastAgent: state?.lastSession?.agent || tracker.agent,
+      lastDate: state?.lastSession?.date || tracker.date,
+      lastSummary: state?.lastSession?.summary || tracker.summary,
+      branch: state?.lastSession?.branch || tracker.branch,
+      commit: state?.lastSession?.commit || tracker.commit
     },
     warnings,
     inProgress: inProgressLines,
@@ -2162,7 +2254,11 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
       openCount: handoffBuckets.open.length,
       assignedToMe: handoffBuckets.assignedToMe.slice(0, 8).map(summarizeHandoff),
       sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 8).map(summarizeHandoff),
-      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff)
+      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff),
+      queued: handoffBuckets.assignedToMe
+        .filter((h) => String(h?.status || '').toLowerCase() === 'queued')
+        .slice(0, 10)
+        .map(summarizeHandoffCard)
     }
   }
 }
@@ -2390,6 +2486,38 @@ function getDashboardHtml() {
       color: var(--muted);
       font-size: 12px;
     }
+    .handoff-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 9px;
+      margin-bottom: 6px;
+    }
+    .handoff-card-summary {
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .handoff-card-meta {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 3px;
+    }
+    .handoff-card-actions {
+      display: flex;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .handoff-card-actions button {
+      font-size: 11px;
+      padding: 3px 7px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: rgba(11, 29, 18, 0.82);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .handoff-card-actions button:hover {
+      border-color: #6adf9a;
+    }
     .status-pill {
       display: inline-block;
       border-radius: 8px;
@@ -2556,6 +2684,11 @@ function getDashboardHtml() {
           <ul id="handoffBlocked" class="list"></ul>
         </section>
 
+        <section class="card" id="queuedHandoffsSection">
+          <h3>Queued Handoffs</h3>
+          <div id="queuedHandoffsList"></div>
+        </section>
+
         <section class="card">
           <h3>Tracker</h3>
           <dl class="kv">
@@ -2686,7 +2819,7 @@ function getDashboardHtml() {
     }
 
     function formatCompactTask(value) {
-      const text = String(value || '').replace(/\s+/g, ' ').trim();
+      const text = String(value || '').replace(/\\s+/g, ' ').trim();
       if (!text) return '-';
       if (text.length <= 90) return text;
       return text.slice(0, 89) + '...';
@@ -2771,6 +2904,65 @@ function getDashboardHtml() {
 
     function formatHandoff(item) {
       return item.id + ' | ' + item.summary + ' (' + item.status + ', ' + item.mode + ')';
+    }
+
+    function renderQueuedHandoffs(handoffs) {
+      const container = byId('queuedHandoffsList');
+      if (!container) return;
+      container.innerHTML = '';
+      if (!handoffs || handoffs.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'empty';
+        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
+        empty.textContent = 'No queued handoffs assigned to you.';
+        container.appendChild(empty);
+        return;
+      }
+      handoffs.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'handoff-card';
+
+        const summaryEl = document.createElement('div');
+        summaryEl.className = 'handoff-card-summary';
+        summaryEl.textContent = item.summary;
+        card.appendChild(summaryEl);
+
+        const metaEl = document.createElement('div');
+        metaEl.className = 'handoff-card-meta';
+        metaEl.textContent = 'From: ' + item.from_agent + ' | To: ' + item.to_agents_display + ' | Files: ' + item.files_display;
+        card.appendChild(metaEl);
+
+        if (item.notes) {
+          const notesEl = document.createElement('div');
+          notesEl.className = 'handoff-card-meta';
+          notesEl.textContent = 'Notes: ' + item.notes;
+          card.appendChild(notesEl);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'handoff-card-actions';
+
+        const claimBtn = document.createElement('button');
+        claimBtn.textContent = 'Claim';
+        claimBtn.setAttribute('data-handoff-action', 'claim');
+        claimBtn.setAttribute('data-handoff-id', item.id);
+        actions.appendChild(claimBtn);
+
+        const startBtn = document.createElement('button');
+        startBtn.textContent = 'Start';
+        startBtn.setAttribute('data-handoff-action', 'start');
+        startBtn.setAttribute('data-handoff-id', item.id);
+        actions.appendChild(startBtn);
+
+        const skipBtn = document.createElement('button');
+        skipBtn.textContent = 'Skip';
+        skipBtn.setAttribute('data-handoff-action', 'skip');
+        skipBtn.setAttribute('data-handoff-id', item.id);
+        actions.appendChild(skipBtn);
+
+        card.appendChild(actions);
+        container.appendChild(card);
+      });
     }
 
     function renderCompactSummary(compactModel) {
@@ -2882,6 +3074,7 @@ function getDashboardHtml() {
       renderList('handoffAssigned', model.handoffs.assignedToMe, formatHandoff, 'No direct assignments');
       renderList('handoffShared', model.handoffs.sharedWithMe, formatHandoff, 'No shared assignments');
       renderList('handoffBlocked', model.handoffs.blockedOrStale, formatHandoff, 'No blocked/stale handoffs');
+      renderQueuedHandoffs(model.handoffs.queued || []);
       renderList('warningsList', model.warnings, (w) => w, 'No warnings');
 
       if (!pendingCommand) {
@@ -2944,6 +3137,17 @@ function getDashboardHtml() {
       const moreToggle = event.target.closest('[data-role="compact-more-toggle"]');
       if (moreToggle) {
         setCompactMoreOpen(!compactMoreOpen);
+        return;
+      }
+
+      // Handoff card action buttons (Claim / Start / Skip)
+      const handoffBtn = event.target.closest('[data-handoff-action]');
+      if (handoffBtn) {
+        const action = handoffBtn.getAttribute('data-handoff-action');
+        const handoffId = handoffBtn.getAttribute('data-handoff-id');
+        if (action && handoffId) {
+          vscode.postMessage({ type: 'handoff-action', action, handoffId });
+        }
         return;
       }
 
@@ -3084,6 +3288,14 @@ class AgentSyncDashboardViewProvider {
         return
       }
 
+      if (message?.type === 'handoff-action') {
+        const workspaceFolder = getActiveWorkspaceFolder()
+        if (!workspaceFolder) return
+        await handleHandoffAction(workspaceFolder, message.action, message.handoffId, this.context)
+        this.refresh()
+        return
+      }
+
       const command = String(message?.command || '')
       if (!command) return
       if (command === 'agentsync.refreshPanel') {
@@ -3108,6 +3320,54 @@ class AgentSyncDashboardViewProvider {
     })
 
     this.refresh()
+  }
+}
+
+/**
+ * Handle a handoff action (claim / start / skip) triggered from the dashboard webview.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} action
+ * @param {string} handoffId
+ * @param {vscode.ExtensionContext} context
+ */
+async function handleHandoffAction(workspaceFolder, action, handoffId, context) {
+  const normalizedId = toSingleLine(handoffId)
+  if (!normalizedId) return
+
+  const state = readStateFile(workspaceFolder) || {}
+  const currentAgent = state?.activeSession?.agent || state?.lastSession?.agent || ''
+
+  if (action === 'claim') {
+    claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
+    vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`)
+  } else if (action === 'start') {
+    const { handoffs } = readHandoffs(workspaceFolder)
+    const handoff = handoffs.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
+    const goalPreFill = handoff ? toSingleLine(handoff.summary) : ''
+    claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
+    await startSession(context, { goalPreFill, agentPreFill: currentAgent })
+  } else if (action === 'skip') {
+    const store = readHandoffs(workspaceFolder)
+    const now = new Date().toISOString()
+    const updated = store.handoffs.map((h) => {
+      if (toSingleLine(h?.handoff_id) !== normalizedId) return h
+      return {
+        ...h,
+        status: 'blocked',
+        updated_at: now,
+        state_history: [
+          ...(Array.isArray(h.state_history) ? h.state_history : []),
+          {
+            status: 'blocked',
+            agent: canonicalAgentId(currentAgent),
+            timestamp: now,
+            reason: 'skipped via dashboard'
+          }
+        ]
+      }
+    })
+    writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
+    vscode.window.showInformationMessage(`AgentSync: Handoff ${normalizedId} marked as skipped.`)
   }
 }
 
@@ -3637,11 +3897,16 @@ function updateStatusBar(statusItem) {
     const tooltipLines = []
     tooltipLines.push(`State: ${opsState.label}`)
     tooltipLines.push(opsState.reason)
-    if (!isEmptyValue(tracker.agent) || !isEmptyValue(tracker.date)) {
-      tooltipLines.push(`Last session: ${tracker.agent} | ${tracker.date}`)
+    // Prefer state.json lastSession fields for display; fall back to parsed tracker.
+    const displayAgent = state?.lastSession?.agent || tracker.agent
+    const displayDate = state?.lastSession?.date || tracker.date
+    const displayBranch = state?.lastSession?.branch || tracker.branch
+    const displayCommit = state?.lastSession?.commit || tracker.commit
+    if (!isEmptyValue(displayAgent) || !isEmptyValue(displayDate)) {
+      tooltipLines.push(`Last session: ${displayAgent} | ${displayDate}`)
     }
-    if (!isEmptyValue(tracker.branch) || !isEmptyValue(tracker.commit)) {
-      tooltipLines.push(`Branch: ${tracker.branch} | Commit: ${tracker.commit}`)
+    if (!isEmptyValue(displayBranch) || !isEmptyValue(displayCommit)) {
+      tooltipLines.push(`Branch: ${displayBranch} | Commit: ${displayCommit}`)
     }
     if (handoffInfo.handoffs.length > 0) {
       const openHandoffs = handoffInfo.handoffs.filter((h) =>
@@ -3862,7 +4127,7 @@ async function clearActiveSession() {
  * Start a session and append an In Progress entry.
  * @param {vscode.ExtensionContext} context
  */
-async function startSession(context) {
+async function startSession(context, options = {}) {
   const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
   if (!workspaceFolder) {
     vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
@@ -3879,14 +4144,55 @@ async function startSession(context) {
   }
 
   const tracker = parseTracker(content)
-  const agent = await promptForAgent(tracker.agent)
+  const config = readAgentSyncConfig(workspaceFolder)
+  const zeroTouchCfg = config.automation?.startSessionZeroTouch || DEFAULT_START_SESSION_ZERO_TOUCH
+  const zeroTouchEnabled = zeroTouchCfg.enabled === true
+
+  let goalPreFill = options.goalPreFill || ''
+  let agentPreFill = options.agentPreFill || ''
+  let claimedHandoff = null
+
+  if (zeroTouchEnabled) {
+    // Detect most-likely agent from current state or tracker
+    const currentState = readStateFile(workspaceFolder) || {}
+    agentPreFill = agentPreFill || currentState?.lastSession?.agent || tracker.agent || ''
+
+    if (agentPreFill) {
+      const candidate = findClaimableHandoff(workspaceFolder, agentPreFill)
+      if (candidate) {
+        if (zeroTouchCfg.autoClaimHandoff) {
+          // Fully auto: claim immediately without prompting
+          claimHandoffRecord(workspaceFolder, toSingleLine(candidate.handoff_id), agentPreFill)
+          goalPreFill = goalPreFill || toSingleLine(candidate.summary)
+          vscode.window.showInformationMessage(
+            `AgentSync: Picked up handoff ${candidate.handoff_id}: ${toSingleLine(candidate.summary)}`
+          )
+        } else if (zeroTouchCfg.promptPreFill) {
+          // Semi-auto: pre-fill goal for user confirmation, claim after user accepts
+          goalPreFill = goalPreFill || toSingleLine(candidate.summary)
+          claimedHandoff = candidate
+        }
+      }
+    }
+  }
+
+  const agent = await promptForAgent(agentPreFill || tracker.agent)
   if (!agent) return
 
   const goal = await vscode.window.showInputBox({
     prompt: 'What are you working on this session?',
-    placeHolder: 'Example: Implement auth callback retries'
+    placeHolder: 'Example: Implement auth callback retries',
+    value: goalPreFill
   })
   if (goal === undefined) return
+
+  // If user confirmed with a pre-filled handoff (semi-auto), claim it now
+  if (zeroTouchEnabled && !zeroTouchCfg.autoClaimHandoff && claimedHandoff) {
+    claimHandoffRecord(workspaceFolder, toSingleLine(claimedHandoff.handoff_id), agent)
+    vscode.window.showInformationMessage(
+      `AgentSync: Claimed handoff ${claimedHandoff.handoff_id}: ${toSingleLine(claimedHandoff.summary)}`
+    )
+  }
 
   try {
     startSessionCore(workspaceFolder, agent, goal)
@@ -4415,6 +4721,59 @@ function startSessionReminderTimer(context) {
 // â”€â”€â”€ Extension lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
+ * Provides file decorations (badge + color) for hot files tracked in state.json.
+ * Implements vscode.FileDecorationProvider.
+ */
+class AgentSyncHotFileDecorationProvider {
+  constructor() {
+    this._emitter = new vscode.EventEmitter()
+    this.onDidChangeFileDecorations = this._emitter.event
+    /** @type {Set<string>} absolute fsPaths of hot files */
+    this._hotFilePaths = new Set()
+    /** @type {Map<string, string>} fsPath -> last agent label */
+    this._agentByPath = new Map()
+  }
+
+  /**
+   * @param {vscode.WorkspaceFolder} workspaceFolder
+   * @param {string[]} hotFiles workspace-relative paths
+   * @param {string} lastAgent agent label for tooltip
+   */
+  update(workspaceFolder, hotFiles, lastAgent) {
+    this._hotFilePaths.clear()
+    this._agentByPath.clear()
+    const agent = String(lastAgent || 'unknown agent')
+    for (const rel of hotFiles || []) {
+      const abs = path.join(workspaceFolder.uri.fsPath, rel)
+      this._hotFilePaths.add(abs)
+      this._agentByPath.set(abs, agent)
+    }
+    this._emitter.fire(undefined)
+  }
+
+  clear() {
+    this._hotFilePaths.clear()
+    this._agentByPath.clear()
+    this._emitter.fire(undefined)
+  }
+
+  /**
+   * @param {vscode.Uri} uri
+   * @returns {vscode.FileDecoration | undefined}
+   */
+  provideFileDecoration(uri) {
+    const p = uri.fsPath
+    if (!this._hotFilePaths.has(p)) return undefined
+    const agent = this._agentByPath.get(p) || 'another agent'
+    return new vscode.FileDecoration(
+      '!',
+      `Hot file \u2014 last modified by ${agent}. Check AgentTracker.md before editing.`,
+      new vscode.ThemeColor('editorWarning.foreground')
+    )
+  }
+}
+
+/**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
@@ -4439,10 +4798,32 @@ function activate(context) {
     showCollapseAll: true
   })
 
+  // ── Hot file decoration provider ──
+  const hotFileDecorationProvider = new AgentSyncHotFileDecorationProvider()
+  const decorationProviderDisposable =
+    vscode.window.registerFileDecorationProvider(hotFileDecorationProvider)
+
+  const refreshHotFileDecorations = () => {
+    const folder = getActiveWorkspaceFolder()
+    if (!folder) {
+      hotFileDecorationProvider.clear()
+      return
+    }
+    const state = readStateFile(folder)
+    const hotFiles = Array.isArray(state?.hotFiles) ? state.hotFiles : []
+    if (hotFiles.length > 0) {
+      const agent = state?.activeSession?.agent || state?.lastSession?.agent || 'unknown'
+      hotFileDecorationProvider.update(folder, hotFiles, agent)
+    } else {
+      hotFileDecorationProvider.clear()
+    }
+  }
+
   const refresh = () => {
     updateStatusBar(statusItem)
     treeProvider.refresh()
     dashboardProvider.refresh()
+    refreshHotFileDecorations()
   }
 
   // â”€â”€ File watchers â”€â”€
@@ -4481,6 +4862,29 @@ function activate(context) {
   // Refresh the panel when the active editor changes (workspace folder may differ)
   const onEditorChange = vscode.window.onDidChangeActiveTextEditor(refresh)
   const onWorkspaceChange = vscode.workspace.onDidChangeWorkspaceFolders(refresh)
+
+  // Warn when a hot file is opened during an active session
+  const onOpenDoc = vscode.workspace.onDidOpenTextDocument((doc) => {
+    const folder = vscode.workspace.getWorkspaceFolder(doc.uri)
+    if (!folder) return
+    const state = readStateFile(folder)
+    if (!state?.sessionActive) return
+    const hotFiles = Array.isArray(state?.hotFiles) ? state.hotFiles : []
+    if (hotFiles.length === 0) return
+    const rel = path.relative(folder.uri.fsPath, doc.uri.fsPath).replace(/\\/g, '/')
+    if (!hotFiles.includes(rel)) return
+    const agent = state?.activeSession?.agent || state?.lastSession?.agent || 'another agent'
+    vscode.window
+      .showWarningMessage(
+        `AgentSync: "${rel}" is a hot file currently being modified by ${agent}. Check AgentTracker.md before editing.`,
+        'Open AgentTracker'
+      )
+      .then((choice) => {
+        if (choice === 'Open AgentTracker') {
+          vscode.commands.executeCommand('agentsync.openTracker')
+        }
+      })
+  })
 
   // Tick the elapsed-time display every 60 seconds while a session is active
   const elapsedTimer = setInterval(() => {
@@ -4564,6 +4968,7 @@ function activate(context) {
     statusItem,
     dashboardView,
     treeView,
+    decorationProviderDisposable,
     trackerWatcher,
     configWatcher,
     handoffsWatcher,
@@ -4571,6 +4976,7 @@ function activate(context) {
     requestWatcher,
     onEditorChange,
     onWorkspaceChange,
+    onOpenDoc,
     { dispose: () => clearInterval(elapsedTimer) },
     { dispose: () => clearInterval(statePulseTimer) },
     initCmd,

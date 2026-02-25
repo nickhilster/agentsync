@@ -1,7 +1,27 @@
 {
   "staleAfterHours": 24,
+  "autoStaleSessionMinutes": 0,
+  "requireHandoffOnEndSession": false,
+  "automation": {
+    "endSessionZeroTouch": {
+      "enabled": false,
+      "autonomy": "mostly_full_auto",
+      "copyPromptToClipboard": true,
+      "maxSummaryLength": 180
+    },
+    "startSessionZeroTouch": {
+      "enabled": true,
+      "autoClaimHandoff": false,
+      "promptPreFill": true
+    },
+    "handoffRoutingDefaults": {
+      "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] },
+      "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": [] },
+      "copilot": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] }
+    }
+  },
   "commands": {
-    "build": "npm run vsix:package",
+    "build": "",
     "test": "npm test",
     "deploy": ""
   }
