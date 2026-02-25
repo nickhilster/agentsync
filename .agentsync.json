@@ -3,6 +3,6 @@
   "commands": {
     "build": "npm run vsix:package",
     "test": "npm test",
-    "deploy": "npx @vscode/vsce publish"
+    "deploy": ""
   }
 }
