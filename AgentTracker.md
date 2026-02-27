@@ -6,31 +6,37 @@
 ## Last Session
 
 - **Agent:** Codex
-- **Date:** 2026-02-22T00:00:00Z
-- **Summary:** Implemented AgentSync Live webview dashboard, handoff-aware details panel, stale-session controls, and local VSIX refresh workflow.
+- **Date:** 2026-02-27T03:14:02Z
+- **Summary:** Implemented Codex-on-Windows power-user operating model assets (role-specific agent instructions, playbook, reusable packet/report/checklist templates, and repo-level `.codex` profile config).
 - **Branch:** master
-- **Commit:** (see latest commit after EOD push)
+- **Commit:** 0d682407531b131d27185f00b86d45f5643bc529 (working tree has uncommitted changes)
 
 ## Current Health
 
 | Check  | Status |
 | ------ | ------ |
 | Build  | Not configured |
-| Tests  | Not configured |
+| Tests  | Pass |
 | Deploy | Not configured |
 
 ## Hot Files
 
 <!-- Files recently changed. Other agents should coordinate before editing these. -->
 
-- `extension.js`
-- `package.json`
-- `README.md`
+- `.github/copilot-instructions.md`
+- `AGENTS.md`
 - `CHANGELOG.md`
-- `templates/AgentTracker.md`
-- `templates/agentsync.json`
-- `scripts/refresh-vsix.js`
-- `schemas/handoffs.schema.json`
+- `CLAUDE.md`
+- `README.md`
+- `.codex/config.toml`
+- `.codex/README.md`
+- `docs/codex-windows-power-user-playbook.md`
+- `docs/templates/execution-packet.md`
+- `docs/templates/codex-output-report.md`
+- `docs/templates/pr-gate-checklist.md`
+- `templates/AGENTS.md`
+- `templates/CLAUDE.md`
+- `templates/copilot-instructions.md`
 
 ## In Progress
 
@@ -41,10 +47,9 @@
 ## Suggested Next Work
 
 <!-- Leave notes for the next agent here. -->
-- Verify `AgentSync Live` webview in Extension Development Host after reload and run through Start/End/Clear flows once.
-- Decide default `autoStaleSessionMinutes` for new workspaces (currently `0`, disabled).
-- Optionally add automated tests for `getOperationalState`, stale-session logic, and handoff bucket grouping.
-- Confirm packaging allowlist/ignore strategy for root protocol docs that are now present in repo.
+- Validate the new power-user playbook in a real task run and refine any wording that causes ambiguous handoffs.
+- Decide whether `initWorkspace` should optionally scaffold the new `.codex/` and `docs/templates/` assets for fresh workspaces.
+- Add an automated test or fixture to ensure template instruction files stay in sync with root instruction files.
 
 ## Known Issues & Gotchas
 
@@ -59,3 +64,4 @@
 - Use `npm run vsix:refresh` for local package + reinstall test loop.
 - Keep machine-readable handoffs in `.agentsync/handoffs.json`; UI reads and summarizes it.
 - Tree panel (`AgentSync Details`) remains as fallback/details view; `AgentSync Live` is the primary visual dashboard.
+- For Codex-heavy teams, use structured packet/report interfaces (`docs/templates/*`) instead of prose-only task handoffs.

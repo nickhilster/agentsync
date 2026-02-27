@@ -2,6 +2,19 @@
 
 All notable changes to AgentSync are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Codex Windows power-user playbook** - added a decision-complete workflow guide for multi-agent teams using Codex as execution writer (`docs/codex-windows-power-user-playbook.md`).
+- **Execution interface templates** - added reusable templates for Codex input packets, Codex output reports, and PR gate checks (`docs/templates/*`).
+- **Repo Codex profile config** - added `.codex/config.toml` plus usage notes for `safe-review` and `fast-exec` modes.
+
+### Changed
+
+- **Agent instruction contracts** - expanded `AGENTS.md`, `CLAUDE.md`, and Copilot instructions (including templates) with ownership model, required handoff schema, validation cycle, Windows defaults, and safety posture.
+- **README guidance** - added a dedicated section linking the new power-user workflow assets.
+
 ## [0.3.5] - 2026-02-25
 
 ### Added

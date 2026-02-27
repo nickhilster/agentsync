@@ -11,6 +11,7 @@ AgentSync is built for design and product teams using AI agents (Claude, Codex, 
 3. Open `AgentSync: Open Live Dashboard`.
 4. (Optional) Run `AgentSync: Open Interactive Tutorial` for guided onboarding.
 5. Start work with `AgentSync: Start Session`, then close with `AgentSync: End Session`.
+6. (Optional) Apply the Codex Windows power-user workflow from `docs/codex-windows-power-user-playbook.md`.
 
 ## Why AgentSync
 
@@ -38,6 +39,16 @@ All instructions point to `AgentTracker.md`, the shared handoff file.
 - Hot files touched recently
 - Active work in progress
 - Suggested next work and known gotchas
+
+## Codex Windows Power-User Kit
+
+This repo now includes an implementation-ready operating model for Codex-heavy teams on Windows:
+
+- playbook: `docs/codex-windows-power-user-playbook.md`
+- input template: `docs/templates/execution-packet.md`
+- output template: `docs/templates/codex-output-report.md`
+- PR gate checklist: `docs/templates/pr-gate-checklist.md`
+- repo Codex config profiles: `.codex/config.toml` (`safe-review`, `fast-exec`)
 
 ## Live Dashboard
 

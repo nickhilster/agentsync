@@ -1,0 +1,19 @@
+# Repository defaults for Codex CLI/App sessions.
+# Keep this aligned with AGENTS.md workflow rules.
+
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+
+[profiles.safe-review]
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "read-only"
+
+[profiles.fast-exec]
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"

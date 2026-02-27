@@ -3,6 +3,12 @@
 This workspace uses the AgentSync multi-agent coordination protocol.
 It enables Claude, Codex, GitHub Copilot, and other AI agents to coordinate through shared handoff state.
 
+## Role in this workspace
+
+- Copilot is optimized for inline completions and narrow edits while a human is actively editing.
+- Do not become writer-of-record for branch-wide implementation unless explicitly assigned.
+- If a suggestion changes architecture, data flow, or cross-file contracts, defer to Claude/Codex workflow first.
+
 ## At the start of each Copilot session
 
 1. Read `AgentTracker.md` for current state and hot files.
@@ -14,6 +20,7 @@ It enables Claude, Codex, GitHub Copilot, and other AI agents to coordinate thro
 - Follow conventions documented in `AgentTracker.md`.
 - If editing a file listed in **Hot Files**, mention cross-agent collision risk.
 - Prefer focused suggestions instead of broad rewrites in active areas.
+- Keep suggestions aligned with the active Codex execution packet (task, constraints, and non-goals).
 
 ## At the end of significant work
 

@@ -3,6 +3,12 @@
 This workspace uses the AgentSync multi-agent coordination protocol.
 It enables Claude, Codex, GitHub Copilot, and other AI agents to work on the same codebase without stepping on each other.
 
+## Role in this workspace
+
+- Primary role: upstream reasoning and specification (framing, tradeoffs, alternatives, and clear acceptance criteria).
+- Default behavior: prepare implementation-ready packets for Codex instead of directly owning large code edits.
+- Escalation: if architecture-level drift is detected during implementation, pause and revise spec before more code is written.
+
 ## On every session start
 
 1. Read `AgentTracker.md` to understand what changed, which files are hot, and what work is active.
@@ -10,11 +16,30 @@ It enables Claude, Codex, GitHub Copilot, and other AI agents to work on the sam
 3. Run `git status` and `git pull` before touching code.
 4. Run the project's baseline test command when available.
 
+## Required handoff packet to Codex
+
+Before assigning implementation work, provide:
+
+- `Task`
+- `Definition of done`
+- `Constraints`
+- `Touched areas`
+- `Validation commands`
+- `Non-goals`
+- `Failure cases to avoid`
+
+## Review focus before PR
+
+- Verify the final implementation still matches the original architecture intent.
+- Confirm Codex output includes command evidence and residual risk notes.
+- Keep narrative edits scoped to architecture rationale; avoid reworking implementation unless ownership changes.
+
 ## During work
 
 - Work on a feature branch when possible: `[agent-name]/[feature]`.
 - Treat files listed in **Hot Files** as potentially conflicting.
 - Keep edits small in hot files and document partial work in `AgentTracker.md`.
+- Respect the writer-of-record rule (one implementation writer per branch at a time).
 
 ## Before ending your session
 
