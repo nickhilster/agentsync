@@ -1,6 +1,6 @@
 'use strict'
 
-const { _testExports } = require('../../extension')
+const { _testExports } = require('../../src/extension')
 const { getSectionBody, setSectionBody } = _testExports
 
 // Note: getSectionBody uses [\s\S]*? with the 'm' flag, where $ matches end of each line.

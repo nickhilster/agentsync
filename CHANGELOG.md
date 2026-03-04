@@ -2,6 +2,27 @@
 
 All notable changes to AgentSync are documented here.
 
+## [0.3.7] - 2026-03-01
+
+### Added
+
+- User role presets: workspace init and session start now ask for role (founder, UX, dev, non‑tech, systems designer) and adjust agent instructions, dashboard shortcuts, and handoff routing accordingly.
+- Dynamic dashboard shortcuts driven by role configuration (compact/full panels render role‑specific actions).
+- Capability‑based model recommendation: End Session computes required capabilities and suggests a worker/lead tier model; info appears in summary message and on handoff cards.
+- `agentsync.setRole` command to change role post‑init.
+- `recommended_model` and `capability_reason` fields added to handoff schema.
+- `scoreNextTaskCapabilities` utility + tests.
+
+### Changed
+
+- `readAgentSyncConfig` now supports `userProfile`, `dashboardShortcuts`, and related config entries; new `writeConfigFile` helper.
+- Several core functions refactored to support role and capability logic.
+
+### Fixed
+
+- Cleaned syntax errors exposed by new tests.
+
+
 ## [0.3.5] - 2026-02-25
 
 ### Added

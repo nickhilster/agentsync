@@ -308,13 +308,54 @@ function readAgentSyncConfig(workspaceFolder) {
     }
     return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults }
   }
+  const DEFAULT_TOKEN_BUDGET = Object.freeze({
+    maxTokensDefault: 4000,
+    batchSimilarTasks: true,
+    enableCaching: true,
+    sessionDurationWarningMinutes: 0
+  })
+  const normalizeTokenBudget = (value = {}) => ({
+    maxTokensDefault: toNumber(value.maxTokensDefault, DEFAULT_TOKEN_BUDGET.maxTokensDefault),
+    batchSimilarTasks:
+      value.batchSimilarTasks === undefined ? true : value.batchSimilarTasks === true,
+    enableCaching: value.enableCaching === undefined ? true : value.enableCaching === true,
+    sessionDurationWarningMinutes: Math.max(
+      0,
+      Math.round(
+        toNumber(
+          value.sessionDurationWarningMinutes,
+          DEFAULT_TOKEN_BUDGET.sessionDurationWarningMinutes
+        )
+      )
+    )
+  })
+  const normalizeModelTiers = (value = {}) => {
+    const result = {}
+    for (const [tier, def] of Object.entries(value)) {
+      if (tier !== 'worker' && tier !== 'lead') continue
+      result[tier] = {
+        models: Array.isArray(def?.models)
+          ? def.models.map((m) => String(m).trim()).filter(Boolean)
+          : [],
+        useCases: Array.isArray(def?.useCases)
+          ? def.useCases.map((u) => String(u).trim()).filter(Boolean)
+          : []
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null
+  }
   const defaults = {
     staleAfterHours: DEFAULT_STALE_HOURS,
     autoStaleSessionMinutes:
       Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0 ? settingsAutoStale : 0,
     commands: {},
     requireHandoffOnEndSession: false,
-    automation: normalizeAutomation({})
+    automation: normalizeAutomation({}),
+    modelTiers: null,
+    tokenBudget: normalizeTokenBudget({}),
+    userProfile: null,
+    dashboardShortcuts: null,
+    sessionDurationWarningMinutes: 0
   }
   const configPath = getConfigPath(workspaceFolder)
   if (!fs.existsSync(configPath)) return defaults
@@ -336,11 +377,31 @@ function readAgentSyncConfig(workspaceFolder) {
           : 0,
       commands: parsed.commands && typeof parsed.commands === 'object' ? parsed.commands : {},
       requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
-      automation: normalizeAutomation(parsed.automation || {})
+      automation: normalizeAutomation(parsed.automation || {}),
+      modelTiers: normalizeModelTiers(parsed.modelTiers || {}),
+      tokenBudget: normalizeTokenBudget(parsed.tokenBudget || {}),
+      userProfile:
+        parsed.userProfile && typeof parsed.userProfile === 'object' ? parsed.userProfile : null,
+      dashboardShortcuts: Array.isArray(parsed.dashboardShortcuts)
+        ? parsed.dashboardShortcuts
+        : null,
+      sessionDurationWarningMinutes: toNumber(parsed.sessionDurationWarningMinutes, 0)
     }
   } catch {
     return defaults
   }
+}
+
+/**
+ * Write the agentsync config file with pretty JSON.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {any} data
+ */
+function writeConfigFile(workspaceFolder, data) {
+  const configPath = getConfigPath(workspaceFolder)
+  try {
+    atomicWriteFileSync(configPath, JSON.stringify(data, null, 2))
+  } catch {}
 }
 
 /**
@@ -363,6 +424,82 @@ function readStateFile(workspaceFolder) {
  * @param {string | undefined | null} value
  * @returns {string}
  */
+
+/**
+ * Prompt the user to select their workspace role.
+ * @param {string} [prefillRole]
+ * @returns {Promise<string|null>}
+ */
+async function promptForRole(prefillRole) {
+  const picks = ROLE_LIST.map((r) => ({
+    label: r.replace(/_/g, ' '),
+    description: '',
+    role: r
+  }))
+  if (prefillRole) {
+    const match = picks.find((p) => p.role === prefillRole)
+    if (match) return match.role
+  }
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: 'Select your primary role for this project',
+    ignoreFocusOut: true
+  })
+  return selected?.role || null
+}
+
+/**
+ * Apply a preset configuration and instruction block for the given role.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} role
+ */
+function applyRolePreset(workspaceFolder, role) {
+  if (!ROLE_LIST.includes(role)) return
+  const root = workspaceFolder.uri.fsPath
+  // read role JSON template
+  let preset = null
+  try {
+    const rolesDir = path.join(__dirname, 'templates', 'roles')
+    const raw = fs.readFileSync(path.join(rolesDir, `${role}.json`), 'utf8')
+    preset = JSON.parse(raw)
+  } catch {
+    // missing or invalid roles file
+  }
+  if (!preset) return
+
+  // Update Config
+  const cfg = readAgentSyncConfig(workspaceFolder)
+  cfg.userProfile = { role }
+  if (Array.isArray(preset.dashboardShortcuts)) {
+    cfg.dashboardShortcuts = preset.dashboardShortcuts
+  }
+  if (typeof preset.sessionDurationWarningMinutes === 'number') {
+    cfg.sessionDurationWarningMinutes = preset.sessionDurationWarningMinutes
+  }
+  if (preset.handoffRoutingDefaults) {
+    cfg.automation = cfg.automation || {}
+    cfg.automation.handoffRoutingDefaults = preset.handoffRoutingDefaults
+  }
+  writeConfigFile(workspaceFolder, cfg)
+
+  // Append role instructions to agent docs
+  const appendBlock = (filePath, text) => {
+    let content = ''
+    try {
+      content = fs.readFileSync(filePath, 'utf8')
+    } catch {}
+    // remove previous role block
+    content = content.replace(/## Role:[\s\S]*?(?=\n## |$)/g, '')
+    content += '\n\n## Role: ' + role.replace(/_/g, ' ') + '\n\n' + text + '\n'
+    fs.writeFileSync(filePath, content, 'utf8')
+  }
+
+  if (preset.agentInstructionBlock) {
+    appendBlock(path.join(root, 'CLAUDE.md'), preset.agentInstructionBlock)
+    appendBlock(path.join(root, 'AGENTS.md'), preset.agentInstructionBlock)
+    appendBlock(path.join(root, '.github', 'copilot-instructions.md'), preset.agentInstructionBlock)
+  }
+}
+
 function canonicalAgentId(value) {
   return String(value || '')
     .trim()
@@ -818,6 +955,131 @@ function detectHotFiles(workspaceFolder) {
   }
 
   return [...collected].sort((a, b) => a.localeCompare(b))
+}
+
+/**
+ * Normalize a workspace-relative path for stable cross-platform comparisons.
+ * @param {string} filePath
+ * @returns {string}
+ */
+function normalizeRepoRelativePath(filePath) {
+  return String(filePath || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+}
+
+/**
+ * Parse a git diff file header path into a normalized relative path.
+ * @param {string} rawPath
+ * @returns {string}
+ */
+function parseDiffHeaderPath(rawPath) {
+  let value = String(rawPath || '').trim()
+  if (!value || value === '/dev/null') return ''
+  value = value.replace(/^"|"$/g, '')
+  if (value.startsWith('a/') || value.startsWith('b/')) {
+    value = value.slice(2)
+  }
+  return normalizeRepoRelativePath(value)
+}
+
+// Roles available for workspace user
+const ROLE_LIST = [
+  'founder_pm',
+  'ux_designer',
+  'software_developer',
+  'non_technical',
+  'systems_designer'
+]
+
+/**
+ * Score the next task's capabilities based on session context and changes.
+ * @param {string[]} hotFiles
+ * @param {{ file:string, change:string }[]} signatureChanges
+ * @param {{ filesModified?:number, commandsRun?:number }} metrics
+ * @param {number} priorAttempts
+ * @returns {{ tier:'worker'|'lead', capabilities:string[], reason:string }}
+ */
+function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, priorAttempts = 0) {
+  const caps = []
+  let tier = 'worker'
+  if (priorAttempts >= 2) {
+    tier = 'lead'
+    caps.push('repeat-fix')
+  }
+  if (signatureChanges && signatureChanges.length > 0) {
+    tier = 'lead'
+    caps.push('interface/signature change')
+  }
+  if (hotFiles && hotFiles.length > 8) {
+    tier = 'lead'
+    caps.push('multi-file refactor')
+  }
+  if (metrics.filesModified && metrics.filesModified > 15) {
+    tier = 'lead'
+    caps.push('heavy edit')
+  }
+  const reason = caps.length ? 'Detected ' + caps.join(', ') : 'Routine change'
+  return { tier, capabilities: caps, reason }
+}
+
+/**
+ * Detect function/method signature changes in hot files using git diff.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string[]} hotFiles
+ * @returns {{ file: string, change: string }[]}
+ */
+function detectSignatureChanges(workspaceFolder, hotFiles) {
+  if (!hotFiles || hotFiles.length === 0) return []
+
+  const normalizedHotFiles = hotFiles
+    .map((file) => normalizeRepoRelativePath(file))
+    .filter((file) => file.length > 0)
+  if (normalizedHotFiles.length === 0) return []
+
+  // Diff against the parent of the most recent commit.
+  const diff = runGit(workspaceFolder, [
+    'diff',
+    'HEAD~1',
+    '--unified=0',
+    '--',
+    ...normalizedHotFiles
+  ])
+  if (!diff) return []
+
+  const changes = []
+  let currentFile = ''
+  const signatureRegex = /(?:\basync\s+function\b|\bfunction\b|=>|\bdef\b|\bclass\b|:\s*\()/
+
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+      const headerPath = parseDiffHeaderPath(line.slice(4))
+      if (headerPath) currentFile = headerPath
+      continue
+    }
+
+    if (line.startsWith('@@')) continue
+
+    if (changes.length >= 10) break
+
+    const marker = line[0]
+    if ((marker !== '+' && marker !== '-') || line.startsWith('+++') || line.startsWith('---')) {
+      continue
+    }
+
+    const content = line.slice(1).trim()
+    if (!content) continue
+
+    if (signatureRegex.test(content)) {
+      changes.push({
+        file: currentFile || 'unknown',
+        change: line
+      })
+    }
+  }
+
+  return changes
 }
 
 /**
@@ -1278,8 +1540,34 @@ function buildHandoffPromptLines(handoffRecord) {
   const summary = toSingleLine(handoffRecord.summary) || 'continue the current work'
   const mode = String(handoffRecord.owner_mode || '').toLowerCase()
 
+  // Model tier recommendation suffix
+  const modelTier = handoffRecord.recommended_model_tier || null
+  const modelJustification = toSingleLine(handoffRecord.model_justification || '')
+  let modelSuffix = ''
+  if (modelTier === 'worker') {
+    modelSuffix = ' [Worker-tier task: use a lighter model]'
+  } else if (modelTier === 'lead') {
+    modelSuffix = ' [Lead-tier task: use a capable model'
+    if (modelJustification) modelSuffix += ' \u2014 ' + modelJustification
+    modelSuffix += ']'
+  }
+
+  // Context hints suffix
+  const hints = handoffRecord.context_hints || null
+  let contextSuffix = ''
+  if (hints) {
+    const parts = []
+    if (Array.isArray(hints.entry_points) && hints.entry_points.length > 0) {
+      parts.push('entry points: ' + hints.entry_points.slice(0, 3).join(', '))
+    }
+    if (Array.isArray(hints.relevant_symbols) && hints.relevant_symbols.length > 0) {
+      parts.push('key symbols: ' + hints.relevant_symbols.slice(0, 5).join(', '))
+    }
+    if (parts.length > 0) contextSuffix = ' Context: ' + parts.join('; ') + '.'
+  }
+
   const buildLine = (targetLabel) =>
-    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json.`
+    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json.${modelSuffix}${contextSuffix}`
 
   if (mode === 'auto') {
     const caps = Array.isArray(handoffRecord.required_capabilities)
@@ -1546,6 +1834,12 @@ function startSessionCore(workspaceFolder, agent, goal) {
       goal: normalizedGoal,
       startedAt: new Date().toISOString()
     },
+    sessionMetrics: {
+      filesOpened: 0,
+      filesModified: 0,
+      commandsRun: 0,
+      startedAt: new Date().toISOString()
+    },
     lastSession,
     hotFiles: [],
     inProgress: updatedInProgressLines
@@ -1585,6 +1879,13 @@ async function endSessionCore(
   const hotFiles = Array.isArray(options.hotFiles)
     ? options.hotFiles
     : detectHotFiles(workspaceFolder)
+  const signatureChanges = detectSignatureChanges(workspaceFolder, hotFiles)
+  const complexityInfo = scoreNextTaskCapabilities(
+    hotFiles,
+    signatureChanges,
+    state?.sessionMetrics || {},
+    state?.priorAttempts || 0
+  )
 
   // M1: await the now-async health checks so the host is not blocked
   let health = options.healthResults
@@ -1700,6 +2001,22 @@ async function endSessionCore(
     )
   }
 
+  if (signatureChanges.length > 0) {
+    const existingGotchas = getSectionBody(content, 'Known Issues & Gotchas')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith('<!--'))
+      .filter((line) => line)
+    const sigLines = signatureChanges.map(
+      ({ file, change }) =>
+        `- ⚠ Signature change in \`${file}\`: \`${change.trim().slice(0, 120)}\``
+    )
+    content = setSectionBody(
+      content,
+      'Known Issues & Gotchas',
+      [...existingGotchas, ...sigLines].join('\n')
+    )
+  }
   // Persist handoff record if provided
   let handoffRecord = null
   let generatedPromptLines = []
@@ -1742,6 +2059,11 @@ async function endSessionCore(
         ]
       }
     } else {
+      // Determine model tier recommendation based on task complexity
+      const modelTier = handoffData.recommended_model_tier || null
+      const modelJustification = handoffData.model_justification || null
+      const contextHints = handoffData.context_hints || null
+
       // Full handoff record
       handoffRecord = {
         handoff_id: handoffId,
@@ -1754,6 +2076,9 @@ async function endSessionCore(
         summary: toSingleLine(handoffData.summary || normalizedSummary || 'Session update'),
         notes: toSingleLine(handoffData.notes || ''),
         no_handoff_reason: null,
+        recommended_model_tier: modelTier,
+        model_justification: modelJustification ? toSingleLine(modelJustification) : null,
+        context_hints: contextHints,
         files: hotFiles,
         branch,
         commit,
@@ -1819,12 +2144,18 @@ async function endSessionCore(
   const shouldWriteAutomationState =
     automationFeatureEnabled &&
     (automationUsed || summarySource === 'deterministic' || generatedPromptLines.length > 0)
+  const existingMetrics = readStateFile(workspaceFolder)?.sessionMetrics || {}
   const stateLastSession = {
     agent,
     date: now,
     summary: persistedSummary,
     branch,
-    commit
+    commit,
+    sessionMetrics: {
+      filesModified: existingMetrics.filesModified || 0,
+      commandsRun: existingMetrics.commandsRun || 0,
+      durationMs: Date.now() - (parseISODate(existingMetrics.startedAt) || Date.now())
+    }
   }
 
   if (shouldWriteAutomationState) {
@@ -1859,7 +2190,9 @@ async function endSessionCore(
     generatedSummary: normalizedSummary || persistedSummary,
     summarySource,
     handoffPrompts: generatedPromptLines,
-    promptCopiedToClipboard: false
+    promptCopiedToClipboard: false,
+    signatureChanges,
+    complexityInfo
   }
 }
 
@@ -1994,6 +2327,11 @@ async function processDropZoneRequest(workspaceFolder) {
         const { agent, goal } = request
         if (!agent) throw new Error('Missing required field: agent')
         startSessionCore(workspaceFolder, agent, goal || 'Session started')
+        const state = readStateFile(workspaceFolder)
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1
+          writeStateFile(workspaceFolder, state)
+        }
         writeResultFile(workspaceFolder, { ok: true, action, timestamp })
         break
       }
@@ -2001,6 +2339,11 @@ async function processDropZoneRequest(workspaceFolder) {
       case 'endSession': {
         const { agent, summary, nextWork, handoff } = request
         if (!agent) throw new Error('Missing required field: agent')
+        const state = readStateFile(workspaceFolder)
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1
+          writeStateFile(workspaceFolder, state)
+        }
         const hasProvidedSummary = typeof summary === 'string' && toSingleLine(summary).length > 0
         const zeroTouchEnabled =
           readAgentSyncConfig(workspaceFolder).automation?.endSessionZeroTouch?.enabled === true
@@ -2140,6 +2483,21 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
     autoStaleSessionMinutes
   )
   const warnings = trackerContent ? getTrackerWarnings(workspaceFolder, tracker) : []
+
+  // Session duration warning from tokenBudget config
+  const sessionWarnMinutes = config.tokenBudget?.sessionDurationWarningMinutes || 0
+  if (sessionWarnMinutes > 0 && state?.sessionActive && state?.activeSession?.startedAt) {
+    const started = parseISODate(state.activeSession.startedAt)
+    if (Number.isFinite(started)) {
+      const ageMinutes = (Date.now() - started) / 60000
+      if (ageMinutes >= sessionWarnMinutes) {
+        warnings.push(
+          `Session running ${formatElapsed(Date.now() - started)} \u2014 consider ending and handing off to reduce context size.`
+        )
+      }
+    }
+  }
+  const hotFiles = new Set(detectHotFiles(workspaceFolder).map(normalizeRepoRelativePath))
   const getSuggestedNextStep = () => {
     if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.'
     if (state?.sessionActive)
@@ -2176,7 +2534,7 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
     owners: Array.isArray(h?.to_agents) ? h.to_agents : []
   })
   // Full card data for interactive dashboard actions (Claim / Start / Skip)
-  const summarizeHandoffCard = (h) => {
+  const summarizeHandoffCard = (h, stale = false) => {
     const files = Array.isArray(h?.files) ? h.files : []
     const toAgents = Array.isArray(h?.to_agents) ? h.to_agents : []
     return {
@@ -2189,7 +2547,10 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
           ? files.slice(0, 3).join(', ') + ' (+' + (files.length - 3) + ' more)'
           : files.join(', ') || 'none',
       status: String(h?.status || 'queued'),
-      notes: String(h?.notes || '')
+      notes: String(h?.notes || ''),
+      recommended_model_tier: h?.recommended_model_tier || null,
+      model_justification: String(h?.model_justification || ''),
+      stale_observation: stale
     }
   }
   const compactTasks = inProgressLines.slice(0, 2)
@@ -2208,12 +2569,24 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
   }
   const normalizedViewMode = viewMode === 'full' ? 'full' : 'compact'
 
+  const defaultShortcuts = [
+    'agentsync.startSession',
+    'agentsync.endSession',
+    'agentsync.openTracker',
+    'agentsync.contextStatus'
+  ]
+  const shortcuts =
+    Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0
+      ? config.dashboardShortcuts
+      : defaultShortcuts
+
   return {
     hasWorkspace: true,
     workspace: workspaceFolder.name,
     ui: {
       viewMode: normalizedViewMode
     },
+    shortcuts,
     state: {
       key: opsState.key,
       label: opsState.label,
@@ -2258,7 +2631,12 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
       queued: handoffBuckets.assignedToMe
         .filter((h) => String(h?.status || '').toLowerCase() === 'queued')
         .slice(0, 10)
-        .map(summarizeHandoffCard)
+        .map((h) => {
+          const isStale = (h.files || []).some((file) =>
+            hotFiles.has(normalizeRepoRelativePath(file))
+          )
+          return summarizeHandoffCard(h, isStale)
+        })
     }
   }
 }
@@ -2613,6 +2991,7 @@ function getDashboardHtml() {
       <div id="compactMoreActions" class="compact-more-actions">
         <button class="action compact-action" data-command="agentsync.init">Initialize Workspace</button>
         <button class="action compact-action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action compact-action" data-command="agentsync.contextStatus">Context Status</button>
         <button class="action compact-action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
         <button class="action compact-action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
@@ -2626,6 +3005,7 @@ function getDashboardHtml() {
         <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
         <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
         <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action" data-command="agentsync.contextStatus">Context Status</button>
         <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
         <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
@@ -2722,6 +3102,7 @@ function getDashboardHtml() {
       'agentsync.clearActiveSession': 'Clear Active Session',
       'agentsync.openTracker': 'Open AgentTracker',
       'agentsync.openHandoffs': 'Open Handoffs JSON',
+      'agentsync.contextStatus': 'Context Status',
       'agentsync.openTutorial': 'Open Interactive Tutorial',
       'agentsync.refreshPanel': 'Refresh'
     };
@@ -2732,6 +3113,7 @@ function getDashboardHtml() {
       'agentsync.clearActiveSession': '#ff6c74',
       'agentsync.openTracker': '#8ab4ff',
       'agentsync.openHandoffs': '#8ab4ff',
+      'agentsync.contextStatus': '#c59cff',
       'agentsync.openTutorial': '#8ab4ff',
       'agentsync.refreshPanel': '#3dd6d0'
     };
@@ -2793,6 +3175,29 @@ function getDashboardHtml() {
 
     function getCommandColor(command) {
       return commandColors[command] || '#c8d2d8';
+    }
+
+    function renderShortcuts(shortcuts) {
+      const makeButton = (cmd) => {
+        const btn = document.createElement('button');
+        btn.className = 'action';
+        btn.setAttribute('data-command', cmd);
+        const fallbackLabel = cmd.includes('.') ? cmd.slice(cmd.lastIndexOf('.') + 1) : cmd;
+        btn.textContent = commandLabels[cmd] || fallbackLabel;
+        const color = getCommandColor(cmd);
+        btn.style.setProperty('--button-color', color);
+        return btn;
+      };
+      const compactContainer = document.querySelector('.compact-actions');
+      const fullContainer = document.querySelector('.actions');
+      [compactContainer, fullContainer].forEach((container) => {
+        if (!container) return;
+        container.innerHTML = '';
+        shortcuts.forEach((cmd) => {
+          const btn = makeButton(cmd);
+          container.appendChild(btn);
+        });
+      });
     }
 
     function clearActiveCommandHighlight() {
@@ -2932,6 +3337,22 @@ function getDashboardHtml() {
         metaEl.textContent = 'From: ' + item.from_agent + ' | To: ' + item.to_agents_display + ' | Files: ' + item.files_display;
         card.appendChild(metaEl);
 
+        if (item.recommended_model_tier) {
+          const tierEl = document.createElement('span');
+          tierEl.style.cssText = 'display:inline-block;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-top:4px;' +
+            (item.recommended_model_tier === 'lead' ? 'background:#ffb347;color:#1a1a1a;' : 'background:#3dd6d0;color:#1a1a1a;');
+          tierEl.textContent = item.recommended_model_tier === 'lead' ? 'Lead Model' : 'Worker Model';
+          if (item.model_justification) tierEl.title = item.model_justification;
+          card.appendChild(tierEl);
+        }
+
+        if (item.stale_observation) {
+          const staleEl = document.createElement('div');
+          staleEl.style.cssText = 'background: #ffb347; color: #1a1a1a; padding: 2px 6px; border-radius: 3px; font-size: 0.75em; margin-top: 4px;';
+          staleEl.textContent = '⚠ Context may be outdated — re-read these files';
+          card.appendChild(staleEl);
+        }
+
         if (item.notes) {
           const notesEl = document.createElement('div');
           notesEl.className = 'handoff-card-meta';
@@ -3032,6 +3453,7 @@ function getDashboardHtml() {
         setCompactMoreOpen(false);
         clearActiveCommandHighlight();
         setActionsBusy(false);
+        renderShortcuts([]);
         setText('stateText', 'No workspace open');
         setText('nextStep', 'Open a folder/workspace to use AgentSync.');
         setText('compactFocus', 'No workspace open');
@@ -3041,6 +3463,7 @@ function getDashboardHtml() {
       }
 
       setViewMode(model.ui && model.ui.viewMode);
+      renderShortcuts(model.shortcuts || []);
 
       document.body.dataset.state = model.state.key;
       const badge = byId('stateBadge');
@@ -3586,6 +4009,12 @@ class AgentSyncTreeDataProvider {
           'Open machine-readable handoff data'
         ),
         action(
+          'Context Status',
+          'agentsync.contextStatus',
+          'info',
+          'Show session metrics and context health'
+        ),
+        action(
           'Open Interactive Tutorial',
           'agentsync.openTutorial',
           'mortar-board',
@@ -4021,6 +4450,13 @@ async function initWorkspace(context, selectedFolder = null) {
     'Open Interactive Tutorial'
   )
 
+  // prompt for user role if not already set
+  const cfg = readAgentSyncConfig(workspaceFolder)
+  if (!cfg.userProfile || !cfg.userProfile.role) {
+    const role = await promptForRole()
+    if (role) applyRolePreset(workspaceFolder, role)
+  }
+
   if (choice === 'Open AgentSync Panel') {
     const opened = await openAgentSyncPanel()
     if (!opened) {
@@ -4145,6 +4581,12 @@ async function startSession(context, options = {}) {
 
   const tracker = parseTracker(content)
   const config = readAgentSyncConfig(workspaceFolder)
+  if (!config.userProfile || !config.userProfile.role) {
+    const role = await promptForRole()
+    if (role) applyRolePreset(workspaceFolder, role)
+    // reload config after applying preset
+    Object.assign(config, readAgentSyncConfig(workspaceFolder))
+  }
   const zeroTouchCfg = config.automation?.startSessionZeroTouch || DEFAULT_START_SESSION_ZERO_TOUCH
   const zeroTouchEnabled = zeroTouchCfg.enabled === true
 
@@ -4499,6 +4941,16 @@ async function endSession(context) {
       ? 'AgentSync: Session ended. ' + failedChecks + ' health check(s) failed.' + handoffMsg
       : 'AgentSync: Session ended and tracker updated.' + handoffMsg
 
+  // show capability/model recommendation if available
+  if (result && result.complexityInfo) {
+    const info = result.complexityInfo
+    const caps = info.capabilities.length > 0 ? info.capabilities.join(', ') : 'general work'
+    const tierLabel = info.tier === 'lead' ? 'lead-tier' : 'worker-tier'
+    vscode.window.showInformationMessage(
+      `Next task needs ${caps} — suggest a ${tierLabel} model (${info.reason}).`
+    )
+  }
+
   if (zeroTouchEnabled) {
     const summarySourceMsg =
       result.summarySource === 'deterministic'
@@ -4826,9 +5278,35 @@ function activate(context) {
     refreshHotFileDecorations()
   }
 
+  const metricDebounceTimers = new Map()
+  const queueSessionMetricFileChange = (workspaceFolder, changedPath) => {
+    if (!workspaceFolder || !changedPath) return
+    const rootPath = workspaceFolder.uri.fsPath
+    const relPath = normalizeRepoRelativePath(path.relative(rootPath, changedPath))
+    if (!relPath || relPath.startsWith('..') || relPath.includes('.agentsync/')) return
+
+    const timerKey = `${rootPath}::${relPath.toLowerCase()}`
+    const existingTimer = metricDebounceTimers.get(timerKey)
+    if (existingTimer) clearTimeout(existingTimer)
+
+    const timer = setTimeout(() => {
+      metricDebounceTimers.delete(timerKey)
+      const state = readStateFile(workspaceFolder)
+      if (!state?.sessionActive || !state?.sessionMetrics) return
+      state.sessionMetrics.filesModified = (state.sessionMetrics.filesModified || 0) + 1
+      writeStateFile(workspaceFolder, state)
+    }, 350)
+
+    metricDebounceTimers.set(timerKey, timer)
+  }
+
   // â”€â”€ File watchers â”€â”€
   const trackerWatcher = vscode.workspace.createFileSystemWatcher('**/AgentTracker.md')
-  trackerWatcher.onDidChange(refresh)
+  trackerWatcher.onDidChange((uri) => {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri)
+    if (workspaceFolder) queueSessionMetricFileChange(workspaceFolder, uri.fsPath)
+    refresh()
+  })
   trackerWatcher.onDidCreate(refresh)
   trackerWatcher.onDidDelete(refresh)
 
@@ -4845,7 +5323,11 @@ function activate(context) {
   // state.json is written after AgentTracker.md on session changes, but the
   // drop-zone API writes it independently â€” watch it to keep the panel live.
   const stateWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync/state.json')
-  stateWatcher.onDidChange(refresh)
+  stateWatcher.onDidChange((uri) => {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri)
+    if (workspaceFolder) queueSessionMetricFileChange(workspaceFolder, uri.fsPath)
+    refresh()
+  })
   stateWatcher.onDidCreate(refresh)
 
   // Drop-zone API: terminal agents write .agentsync/request.json to trigger actions
@@ -4956,6 +5438,83 @@ function activate(context) {
       )
     }
   })
+  const contextStatusCmd = vscode.commands.registerCommand('agentsync.contextStatus', async () => {
+    const workspaceFolder = await resolveWorkspaceFolder()
+    if (!workspaceFolder) {
+      vscode.window.showWarningMessage('AgentSync: No workspace folder is open.')
+      return
+    }
+
+    const state = readStateFile(workspaceFolder)
+    const handoffInfo = readHandoffs(workspaceFolder)
+    const hotFiles = detectHotFiles(workspaceFolder)
+    const trackerContent = readTracker(workspaceFolder)
+    const inProgressLines =
+      Array.isArray(state?.inProgress) && state.inProgress.length > 0
+        ? state.inProgress
+        : getInProgressLines(trackerContent)
+
+    const openHandoffs = handoffInfo.handoffs.filter((h) =>
+      OPEN_HANDOFF_STATUSES.has(h.status)
+    ).length
+
+    // Estimate complexity from diff size
+    const diffOutput = runGit(workspaceFolder, ['diff', '--shortstat']) || ''
+    const diffMatch = diffOutput.match(
+      /(\d+) files? changed(?:, (\d+) insertions?)?(?:, (\d+) deletions?)?/
+    )
+    const filesChanged = diffMatch ? parseInt(diffMatch[1], 10) : 0
+    const insertions = diffMatch && diffMatch[2] ? parseInt(diffMatch[2], 10) : 0
+    const deletions = diffMatch && diffMatch[3] ? parseInt(diffMatch[3], 10) : 0
+    const totalChanges = insertions + deletions
+
+    let complexity = 'Low'
+    if (totalChanges > 500 || filesChanged > 10) complexity = 'High'
+    else if (totalChanges > 100 || filesChanged > 5) complexity = 'Medium'
+
+    // Session duration
+    let sessionDuration = 'No active session'
+    if (state?.sessionActive && state?.activeSession?.startedAt) {
+      const started = parseISODate(state.activeSession.startedAt)
+      if (Number.isFinite(started)) {
+        sessionDuration = formatElapsed(Date.now() - started)
+      }
+    }
+
+    const lines = [
+      `Session: ${state?.sessionActive ? 'Active (' + sessionDuration + ')' : 'Inactive'}`,
+      `Hot files: ${hotFiles.length}`,
+      `In-progress items: ${inProgressLines.length}`,
+      `Open handoffs: ${openHandoffs}`,
+      `Diff: ${filesChanged} file(s), +${insertions} -${deletions}`,
+      `Estimated complexity: ${complexity}`
+    ]
+
+    if (state?.sessionMetrics) {
+      lines.push(`Files modified this session: ${state.sessionMetrics.filesModified || 0}`)
+      lines.push(`Commands run: ${state.sessionMetrics.commandsRun || 0}`)
+    }
+
+    if (complexity === 'High') {
+      lines.push('', 'Consider ending this session and handing off to reduce context size.')
+    }
+
+    vscode.window.showInformationMessage('AgentSync Context Status', {
+      modal: true,
+      detail: lines.join('\n')
+    })
+  })
+  const setRoleCmd = vscode.commands.registerCommand('agentsync.setRole', async () => {
+    const folder = await resolveWorkspaceFolder({ allowPick: true })
+    if (!folder) return
+    const existing = readAgentSyncConfig(folder)?.userProfile?.role || undefined
+    const role = await promptForRole(existing)
+    if (role) {
+      applyRolePreset(folder, role)
+      vscode.window.showInformationMessage(`AgentSync: role set to ${role.replace(/_/g, ' ')}`)
+    }
+  })
+
   const refreshCmd = vscode.commands.registerCommand('agentsync.refreshPanel', () => {
     refresh()
   })
@@ -4977,6 +5536,14 @@ function activate(context) {
     onEditorChange,
     onWorkspaceChange,
     onOpenDoc,
+    {
+      dispose: () => {
+        for (const timer of metricDebounceTimers.values()) {
+          clearTimeout(timer)
+        }
+        metricDebounceTimers.clear()
+      }
+    },
     { dispose: () => clearInterval(elapsedTimer) },
     { dispose: () => clearInterval(statePulseTimer) },
     initCmd,
@@ -4989,6 +5556,8 @@ function activate(context) {
     startCmd,
     endCmd,
     detectCmd,
+    contextStatusCmd,
+    setRoleCmd,
     refreshCmd
   )
 }
@@ -5011,6 +5580,7 @@ if (process.env.NODE_ENV === 'test') {
     parseCommandArgv,
     validateHandoff,
     getOperationalState,
-    formatElapsed
+    formatElapsed,
+    scoreNextTaskCapabilities
   }
 }

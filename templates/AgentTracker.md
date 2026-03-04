@@ -41,6 +41,10 @@
 
 No open handoffs.
 
+## Failed Approaches
+
+<!-- Approaches that were tried and didn't work. Record what you tried, why it failed, and what constraints were discovered. This prevents the next agent from repeating the same mistakes. -->
+
 ## Known Issues & Gotchas
 
 <!-- Recurring bugs, environment quirks, deployment notes, things that surprised you. -->

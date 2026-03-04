@@ -31,9 +31,53 @@
           "files": { "type": "array", "items": { "type": "string" } },
           "branch": { "type": ["string", "null"] },
           "commit": { "type": ["string", "null"] },
+          "recommended_model_tier": {
+            "type": ["string", "null"],
+            "enum": ["worker", "lead", null],
+            "description": "Recommended model tier for this handoff task. 'worker' for routine edits, 'lead' for complex reasoning."
+          },
+          "model_justification": {
+            "type": ["string", "null"],
+            "description": "Technical justification for the recommended model tier."
+          },
+          "recommended_model": {
+            "type": ["string", "null"],
+            "description": "Advisory specific model or profile suggested for the next agent."
+          },
+          "capability_reason": {
+            "type": ["string", "null"],
+            "description": "Brief human-readable reason describing required capabilities."
+          },
+          "context_hints": {
+            "type": ["object", "null"],
+            "description": "Scoped context to reduce token waste for the receiving agent.",
+            "properties": {
+              "entry_points": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Key functions or files to start reading from."
+              },
+              "relevant_symbols": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Important symbols (functions, classes, types) relevant to this handoff."
+              },
+              "estimated_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Rough estimate of context tokens needed to understand the handoff scope."
+              }
+            },
+            "additionalProperties": false
+          },
           "prior_attempts": { "type": "integer", "minimum": 0, "default": 0 },
           "created_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": ["string", "null"], "format": "date-time" },
+          "stale_observation": {
+            "type": "boolean",
+            "default": false,
+            "description": "True if a file in the handoff has been modified since the handoff was created."
+          },
           "state_history": {
             "type": "array",
             "items": {
