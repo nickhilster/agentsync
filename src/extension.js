@@ -3,230 +3,27 @@ const fs = require('fs')
 const path = require('path')
 const cp = require('child_process')
 
-const PLACEHOLDER = '-'
-const EM_DASH = 'â€”'
-const DEFAULT_STALE_HOURS = 24
-const OPEN_HANDOFF_STATUSES = new Set([
-  'queued',
-  'in_progress',
-  'blocked',
-  'ready_for_review',
-  'approved'
-])
-const DEFAULT_END_SESSION_ZERO_TOUCH = Object.freeze({
-  enabled: false,
-  autonomy: 'mostly_full_auto',
-  copyPromptToClipboard: true,
-  maxSummaryLength: 180
-})
-const DEFAULT_START_SESSION_ZERO_TOUCH = Object.freeze({
-  enabled: false,
-  autoClaimHandoff: false,
-  promptPreFill: true
-})
-const DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
-  claude: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] },
-  codex: { owner_mode: 'single', to_agents: ['claude'], required_capabilities: [] },
-  copilot: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] }
-})
-
-// â”€â”€â”€ Path helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Returns the templates directory bundled with this extension.
- * @param {vscode.ExtensionContext} context
- */
-function getTemplatesDir(context) {
-  return path.join(context.extensionPath, 'templates')
-}
-
-/**
- * Resolve the AgentTracker.md path for a workspace folder.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getTrackerPath(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, 'AgentTracker.md')
-}
-
-/**
- * Resolve the .agentsync.json config path for a workspace folder.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getConfigPath(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, '.agentsync.json')
-}
-
-/**
- * Resolve the .agentsync/ runtime directory for a workspace folder.
- * This directory holds state.json, request.json, and result.json.
- * It should be added to .gitignore â€” initWorkspace does this automatically.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getAgentSyncDir(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, '.agentsync')
-}
-
-/**
- * Resolve the state file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getStatePath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'state.json')
-}
-
-/**
- * Resolve the drop-zone request file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getRequestPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'request.json')
-}
-
-/**
- * Resolve the drop-zone result file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getResultPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'result.json')
-}
-
-/**
- * Resolve the handoffs file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getHandoffsPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'handoffs.json')
-}
-
-// â”€â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Whether a parsed value should be treated as empty.
- * @param {string | undefined | null} value
- */
-function isEmptyValue(value) {
-  const normalized = (value || '').trim()
-  return normalized.length === 0 || normalized === PLACEHOLDER || normalized === EM_DASH
-}
-
-/**
- * Parse AgentTracker.md content for status and automation.
- * @param {string} content
- */
-function parseTracker(content) {
-  const pick = (label) => {
-    const match = content.match(new RegExp(`\\*\\*${escapeRegExp(label)}:\\*\\*\\s*(.+)`))
-    return match?.[1]?.trim() ?? PLACEHOLDER
-  }
-
-  return {
-    agent: pick('Agent'),
-    date: pick('Date'),
-    summary: pick('Summary'),
-    branch: pick('Branch'),
-    commit: pick('Commit')
-  }
-}
-
-/**
- * Escape a string for use in a regular expression.
- * @param {string} value
- * @returns {string}
- */
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-/**
- * Get the content body for a given section heading.
- * @param {string} content
- * @param {string} heading
- * @returns {string}
- */
-function getSectionBody(content, heading) {
-  const matcher = new RegExp(
-    `## ${escapeRegExp(heading)}\\r?\\n\\r?\\n([\\s\\S]*?)(?=\\r?\\n## |$)`,
-    'm'
-  )
-  const match = content.match(matcher)
-  return match?.[1]?.trim() ?? ''
-}
-
-/**
- * Replace a section body and keep the rest of the document intact.
- * @param {string} content
- * @param {string} heading
- * @param {string} body
- * @returns {string}
- */
-function setSectionBody(content, heading, body) {
-  const normalizedBody = body.trimEnd()
-  const matcher = new RegExp(
-    `(## ${escapeRegExp(heading)}\\r?\\n\\r?\\n)([\\s\\S]*?)(?=\\r?\\n## |$)`,
-    'm'
-  )
-
-  if (matcher.test(content)) {
-    return content.replace(matcher, `$1${normalizedBody}\n`)
-  }
-
-  return `${content.trimEnd()}\n\n## ${heading}\n\n${normalizedBody}\n`
-}
-
-// â”€â”€â”€ Workspace helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Get active workspace folder without showing prompts.
- * @returns {vscode.WorkspaceFolder | null}
- */
-function getActiveWorkspaceFolder() {
-  const activeUri = vscode.window.activeTextEditor?.document?.uri
-  if (activeUri) {
-    const activeFolder = vscode.workspace.getWorkspaceFolder(activeUri)
-    if (activeFolder) return activeFolder
-  }
-
-  return vscode.workspace.workspaceFolders?.[0] ?? null
-}
-
-/**
- * Resolve a workspace folder for a command invocation.
- * @param {{ allowPick?: boolean }} options
- * @returns {Promise<vscode.WorkspaceFolder | null>}
- */
-async function resolveWorkspaceFolder(options = {}) {
-  const { allowPick = true } = options
-  const folders = vscode.workspace.workspaceFolders
-  if (!folders || folders.length === 0) return null
-
-  const activeFolder = getActiveWorkspaceFolder()
-  if (activeFolder) return activeFolder
-
-  if (folders.length === 1 || !allowPick) {
-    return folders[0]
-  }
-
-  const picks = folders.map((folder) => ({
-    label: folder.name,
-    description: folder.uri.fsPath,
-    folder
-  }))
-
-  const selected = await vscode.window.showQuickPick(picks, {
-    placeHolder: 'Select a workspace folder for AgentSync'
-  })
-
-  return selected?.folder ?? null
-}
-
-// â”€â”€â”€ Config reader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Modular utility imports ———————————————————————————————————————————
+const {
+  // constants
+  PLACEHOLDER, DEFAULT_STALE_HOURS, OPEN_HANDOFF_STATUSES,
+  DEFAULT_END_SESSION_ZERO_TOUCH, DEFAULT_START_SESSION_ZERO_TOUCH,
+  DEFAULT_HANDOFF_ROUTING_DEFAULTS, ROLE_LIST,
+  // paths
+  getTemplatesDir, getTrackerPath, getConfigPath, getAgentSyncDir,
+  getStatePath, getRequestPath, getResultPath, getHandoffsPath,
+  // text
+  isEmptyValue, escapeRegExp, parseTracker, getSectionBody, setSectionBody,
+  canonicalAgentId, toSingleLine, truncateSingleLine, formatElapsed,
+  // io
+  atomicWriteFileSync, parseISODate, parseCommandArgv, createNonce,
+  // git
+  runGit, runGitExitCode, detectHotFiles, normalizeRepoRelativePath,
+  scoreNextTaskCapabilities, detectSignatureChanges,
+  // workspace
+  getActiveWorkspaceFolder, resolveWorkspaceFolder, getWorkspaceLabelPrefix
+} = require('./utils')
+// ━━━ Config reader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
  * Read optional AgentSync configuration.
@@ -500,12 +297,6 @@ function applyRolePreset(workspaceFolder, role) {
   }
 }
 
-function canonicalAgentId(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '_')
-}
 
 /**
  * Parse normalized In Progress lines from tracker content.
@@ -746,18 +537,7 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
   return { open, assignedToMe, sharedWithMe, blockedOrStale }
 }
 
-/**
- * Create a nonce for webview script/style tags.
- * @returns {string}
- */
-function createNonce() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  let text = ''
-  for (let i = 0; i < 32; i += 1) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return text
-}
+
 
 // â”€â”€â”€ Git helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -767,15 +547,7 @@ function createNonce() {
  * @param {string[]} args
  * @returns {string | null}
  */
-function runGit(workspaceFolder, args) {
-  const result = cp.spawnSync('git', args, {
-    cwd: workspaceFolder.uri.fsPath,
-    encoding: 'utf8'
-  })
 
-  if (result.error || result.status !== 0) return null
-  return result.stdout.trim()
-}
 
 /**
  * Run a git command and return the exit code.
@@ -783,15 +555,7 @@ function runGit(workspaceFolder, args) {
  * @param {string[]} args
  * @returns {number}
  */
-function runGitExitCode(workspaceFolder, args) {
-  const result = cp.spawnSync('git', args, {
-    cwd: workspaceFolder.uri.fsPath,
-    encoding: 'utf8'
-  })
 
-  if (result.error || typeof result.status !== 'number') return 1
-  return result.status
-}
 
 // â”€â”€â”€ Safe file I/O helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -804,11 +568,7 @@ function runGitExitCode(workspaceFolder, args) {
  * @param {string} content
  * @param {BufferEncoding} [encoding]
  */
-function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
-  const tmpPath = `${filePath}.tmp`
-  fs.writeFileSync(tmpPath, content, encoding)
-  fs.renameSync(tmpPath, filePath)
-}
+
 
 /**
  * Parse an ISO 8601 timestamp string into a numeric epoch ms value.
@@ -817,54 +577,13 @@ function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
  * @param {string | null | undefined} str
  * @returns {number}
  */
-function parseISODate(str) {
-  if (!str || typeof str !== 'string') return NaN
-  // Require at least YYYY-MM-DDTHH:MM prefix to reject locale date strings
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str)) return NaN
-  return Date.parse(str)
-}
+
 
 /**
  * Tokenise a command string into [program, ...args] without invoking a shell.
  * Handles quoted substrings (" and ') and backslash escapes within quotes.
  * Does NOT support shell operators (&&, ||, ;, |, $(), backticks) â€” use a
- * shell script file if you need composition in a health check command.
- * C1 fix: prevents shell injection via user-controlled .agentsync.json commands.
- * @param {string} cmd
- * @returns {string[]}
- */
-function parseCommandArgv(cmd) {
-  const args = []
-  let current = ''
-  let i = 0
-  while (i < cmd.length) {
-    const ch = cmd[i]
-    if (ch === '"' || ch === "'") {
-      const quote = ch
-      i++
-      while (i < cmd.length && cmd[i] !== quote) {
-        if (cmd[i] === '\\' && i + 1 < cmd.length) {
-          i++
-          current += cmd[i]
-        } else {
-          current += cmd[i]
-        }
-        i++
-      }
-      // skip closing quote (i++ at end of outer loop handles it)
-    } else if (ch === ' ' || ch === '\t') {
-      if (current.length > 0) {
-        args.push(current)
-        current = ''
-      }
-    } else {
-      current += ch
-    }
-    i++
-  }
-  if (current.length > 0) args.push(current)
-  return args
-}
+
 
 // â”€â”€â”€ Health checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -930,157 +649,7 @@ function runCheckCommand(workspaceFolder, command) {
   })
 }
 
-/**
- * Detect changed files for Hot Files using git.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string[]}
- */
-function detectHotFiles(workspaceFolder) {
-  const collected = new Set()
-  const addLines = (output) => {
-    if (!output) return
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .forEach((line) => collected.add(line))
-  }
 
-  addLines(runGit(workspaceFolder, ['diff', '--name-only']))
-  addLines(runGit(workspaceFolder, ['diff', '--cached', '--name-only']))
-  addLines(runGit(workspaceFolder, ['ls-files', '--others', '--exclude-standard']))
-
-  if (collected.size === 0) {
-    addLines(runGit(workspaceFolder, ['show', '--pretty=format:', '--name-only', 'HEAD']))
-  }
-
-  return [...collected].sort((a, b) => a.localeCompare(b))
-}
-
-/**
- * Normalize a workspace-relative path for stable cross-platform comparisons.
- * @param {string} filePath
- * @returns {string}
- */
-function normalizeRepoRelativePath(filePath) {
-  return String(filePath || '')
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\.\//, '')
-}
-
-/**
- * Parse a git diff file header path into a normalized relative path.
- * @param {string} rawPath
- * @returns {string}
- */
-function parseDiffHeaderPath(rawPath) {
-  let value = String(rawPath || '').trim()
-  if (!value || value === '/dev/null') return ''
-  value = value.replace(/^"|"$/g, '')
-  if (value.startsWith('a/') || value.startsWith('b/')) {
-    value = value.slice(2)
-  }
-  return normalizeRepoRelativePath(value)
-}
-
-// Roles available for workspace user
-const ROLE_LIST = [
-  'founder_pm',
-  'ux_designer',
-  'software_developer',
-  'non_technical',
-  'systems_designer'
-]
-
-/**
- * Score the next task's capabilities based on session context and changes.
- * @param {string[]} hotFiles
- * @param {{ file:string, change:string }[]} signatureChanges
- * @param {{ filesModified?:number, commandsRun?:number }} metrics
- * @param {number} priorAttempts
- * @returns {{ tier:'worker'|'lead', capabilities:string[], reason:string }}
- */
-function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, priorAttempts = 0) {
-  const caps = []
-  let tier = 'worker'
-  if (priorAttempts >= 2) {
-    tier = 'lead'
-    caps.push('repeat-fix')
-  }
-  if (signatureChanges && signatureChanges.length > 0) {
-    tier = 'lead'
-    caps.push('interface/signature change')
-  }
-  if (hotFiles && hotFiles.length > 8) {
-    tier = 'lead'
-    caps.push('multi-file refactor')
-  }
-  if (metrics.filesModified && metrics.filesModified > 15) {
-    tier = 'lead'
-    caps.push('heavy edit')
-  }
-  const reason = caps.length ? 'Detected ' + caps.join(', ') : 'Routine change'
-  return { tier, capabilities: caps, reason }
-}
-
-/**
- * Detect function/method signature changes in hot files using git diff.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string[]} hotFiles
- * @returns {{ file: string, change: string }[]}
- */
-function detectSignatureChanges(workspaceFolder, hotFiles) {
-  if (!hotFiles || hotFiles.length === 0) return []
-
-  const normalizedHotFiles = hotFiles
-    .map((file) => normalizeRepoRelativePath(file))
-    .filter((file) => file.length > 0)
-  if (normalizedHotFiles.length === 0) return []
-
-  // Diff against the parent of the most recent commit.
-  const diff = runGit(workspaceFolder, [
-    'diff',
-    'HEAD~1',
-    '--unified=0',
-    '--',
-    ...normalizedHotFiles
-  ])
-  if (!diff) return []
-
-  const changes = []
-  let currentFile = ''
-  const signatureRegex = /(?:\basync\s+function\b|\bfunction\b|=>|\bdef\b|\bclass\b|:\s*\()/
-
-  for (const line of diff.split(/\r?\n/)) {
-    if (line.startsWith('+++ ') || line.startsWith('--- ')) {
-      const headerPath = parseDiffHeaderPath(line.slice(4))
-      if (headerPath) currentFile = headerPath
-      continue
-    }
-
-    if (line.startsWith('@@')) continue
-
-    if (changes.length >= 10) break
-
-    const marker = line[0]
-    if ((marker !== '+' && marker !== '-') || line.startsWith('+++') || line.startsWith('---')) {
-      continue
-    }
-
-    const content = line.slice(1).trim()
-    if (!content) continue
-
-    if (signatureRegex.test(content)) {
-      changes.push({
-        file: currentFile || 'unknown',
-        change: line
-      })
-    }
-  }
-
-  return changes
-}
 
 /**
  * Execute configured health checks and return per-check status and output.
@@ -1408,29 +977,7 @@ async function promptForAgent(defaultAgent) {
   return trimmed || null
 }
 
-/**
- * Normalize arbitrary text to a single trimmed line.
- * @param {string | undefined | null} value
- * @returns {string}
- */
-function toSingleLine(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
 
-/**
- * Truncate text while preserving a one-line shape.
- * @param {string} value
- * @param {number} maxLength
- * @returns {string}
- */
-function truncateSingleLine(value, maxLength) {
-  const line = toSingleLine(value)
-  if (!Number.isFinite(maxLength) || maxLength <= 0 || line.length <= maxLength) return line
-  if (maxLength <= 3) return line.slice(0, maxLength)
-  return `${line.slice(0, maxLength - 3).trimEnd()}...`
-}
 
 /**
  * Count health check outcomes for summary text.
@@ -2426,17 +1973,7 @@ async function processDropZoneRequest(workspaceFolder) {
 
 // â”€â”€â”€ Tree view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Format a duration in milliseconds as a human-readable elapsed string.
- * @param {number} ms
- * @returns {string}
- */
-function formatElapsed(ms) {
-  const totalMinutes = Math.floor(ms / 60000)
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
-}
+
 
 /**
  * Build a normalized snapshot for the live webview dashboard.
@@ -4259,15 +3796,7 @@ class AgentSyncTreeDataProvider {
 
 // â”€â”€â”€ Status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Format text prefix for multi-root workspaces.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getWorkspaceLabelPrefix(workspaceFolder) {
-  const count = vscode.workspace.workspaceFolders?.length ?? 0
-  return count > 1 ? `${workspaceFolder.name}: ` : ''
-}
+
 
 /**
  * Update status bar item from current AgentTracker.md state.
