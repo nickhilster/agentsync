@@ -101,6 +101,31 @@
         "icon": "$(json)"
       },
       {
+        "command": "agentsync.listHandoffs",
+        "title": "AgentSync: List Handoffs",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "agentsync.claimHandoff",
+        "title": "AgentSync: Claim Handoff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentsync.completeHandoff",
+        "title": "AgentSync: Complete Handoff",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "agentsync.contextCapsule",
+        "title": "AgentSync: Generate Context Capsule",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "agentsync.syncAgencyRuns",
+        "title": "AgentSync: Sync Agency Runs",
+        "icon": "$(sync)"
+      },
+      {
         "command": "agentsync.clearActiveSession",
         "title": "AgentSync: Clear Active Session",
         "icon": "$(circle-slash)"
@@ -190,6 +215,16 @@
           "command": "agentsync.openHandoffs",
           "when": "view == agentsync.panel || view == agentsync.dashboard",
           "group": "navigation@5"
+        },
+        {
+          "command": "agentsync.contextCapsule",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@5.5"
+        },
+        {
+          "command": "agentsync.syncAgencyRuns",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@5.6"
         },
         {
           "command": "agentsync.refreshPanel",

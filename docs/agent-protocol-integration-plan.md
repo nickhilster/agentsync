@@ -1,14 +1,12 @@
 # Agent Protocol Standards Integration Plan
 
-**Source:** Agent Protocol Master Standards for Token Optimization and Context Engineering
-**Date:** 2026-03-01
-**Status:** Phase 1 Complete
+**Source:** Agent Protocol Master Standards for Token Optimization and Context Engineering  
+**Date:** 2026-03-01  
+**Status:** Phase 2 Complete (Updated 2026-03-06)
 
 ## Overview
 
-This plan maps the Agent Protocol Master Standards document against the AgentSync extension (v0.3.5) and identifies concrete edits to integrate its behaviors.
-
----
+This document tracks integration of protocol standards into AgentSync and reflects the implementation state in `src/extension.js`, schema files, and templates.
 
 ## Edit Tracker
 
@@ -20,39 +18,39 @@ This plan maps the Agent Protocol Master Standards document against the AgentSyn
 | 4 | Model tier in handoff prompt lines | Low | Medium | Done |
 | 5 | Token budget advisory config | Low | Low | Done |
 | 6 | Token budget guidance in templates | Low | High | Done |
-| 7 | Retry/backoff guidance in handoff prompts | Low | Low | Done (via templates) |
-| 8 | Context Capsule generator command | Medium | High | Future — requires tree-sitter integration |
+| 7 | Retry/backoff guidance in handoff prompts | Low | Low | Done |
+| 8 | Context Capsule generator command | Medium | High | Done (v1 deterministic capsule) |
 | 9 | Context management hints in handoff prompts | Low | Low | Done |
 | 10 | `contextHints` field in handoff schema | Medium | High | Done |
-| 11 | Stale Observation detection on hot files | Medium | Medium | Done |
-| 12 | "Failed Approaches" section in tracker template | Low | High | Done |
+| 11 | Stale observation detection on hot files | Medium | Medium | Done |
+| 12 | Failed approaches section in tracker template | Low | High | Done |
 | 13 | Signature change detection in endSession | Medium | Medium | Done |
 | 14 | `agentsync.contextStatus` command | Low | High | Done |
-| 15 | Session cost/metrics tracking in state.json | Medium | Low | Done |
+| 15 | Session metrics tracking in state.json | Medium | Low | Done |
 | 16 | Budget/duration warning in dashboard | Medium | Low | Done |
 
 ## Files Modified
 
-- `templates/CLAUDE.md` — Added token budget guidance, model selection guidance
-- `templates/AGENTS.md` — Added token budget guidance, model selection guidance
-- `templates/copilot-instructions.md` — Added token budget guidance
-- `templates/AgentTracker.md` — Added "Failed Approaches" section
-- `templates/agentsync.json` — Added `modelTiers` and `tokenBudget` config sections
-- `schemas/handoffs.schema.json` — Added `recommended_model_tier`, `model_justification`, `context_hints`, `stale_observation`
-- `extension.js` — Added contextStatus command, model tier in handoff prompt lines, model badge in dashboard cards, session duration warning, config parsing for new fields.
-- `extension.js` — Added stale observation detection, signature change detection, and session metrics tracking.
-- `package.json` — Registered `agentsync.contextStatus` command
+- `templates/CLAUDE.md`
+- `templates/AGENTS.md`
+- `templates/copilot-instructions.md`
+- `templates/AgentTracker.md`
+- `templates/agentsync.json`
+- `schemas/handoffs.schema.json`
+- `src/extension.js`
+- `package.json`
 
 ## Remaining Work (Future)
 
-- **#8 Context Capsule generator** — Requires tree-sitter or lightweight parser integration to produce AST-based dependency graphs
+- Optional v2 upgrade: tree-sitter-backed context capsule enrichment (dependency graph and symbol-level scoping)
+- Optional observability extension: richer structured telemetry export for orchestration pipelines
 
-## Implementation Order
+## Implementation Order (Historical)
 
-1. **Quick wins (template/schema):** #6, #12 — Done
-2. **Schema + handoff enrichment:** #2, #10 — Done
-3. **New command:** #14 — Done
-4. **Handoff prompt enrichment:** #4, #7, #9 — Done
-5. **Config additions:** #1, #5 — Done
-6. **Dashboard integration:** #3, #11, #16 — Done
-7. **Advanced:** #8 (Context Capsule), #13 (signature detection), #15 (metrics) — Done
+1. Quick wins (template/schema)
+2. Schema + handoff enrichment
+3. New command integration
+4. Handoff prompt enrichment
+5. Config additions
+6. Dashboard integration
+7. Advanced items (#8 v1, #13, #15)

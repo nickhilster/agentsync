@@ -9,5 +9,6 @@ module.exports = {
   ...require('./text'),
   ...require('./io'),
   ...require('./git'),
-  ...require('./workspace')
+  ...require('./workspace'),
+  ...require('./workspaceSnapshot')
 }

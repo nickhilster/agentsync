@@ -15,7 +15,7 @@
         "additionalProperties": false,
         "properties": {
           "handoff_id": { "type": "string" },
-          "task_id": { "type": "string" },
+          "task_id": { "type": ["string", "null"] },
           "from_agent": { "type": "string", "pattern": "^[a-z0-9_\\-]+$", "description": "canonical agent id (lowercase)" },
           "to_agents": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" }, "minItems": 0 },
           "owner_mode": { "type": "string", "enum": ["single", "shared", "auto"] },
@@ -77,6 +77,18 @@
             "type": "boolean",
             "default": false,
             "description": "True if a file in the handoff has been modified since the handoff was created."
+          },
+          "source_system": {
+            "type": ["string", "null"],
+            "description": "Optional provenance tag for external ingest sources (for example: agencysync)."
+          },
+          "source_run_id": {
+            "type": ["string", "null"],
+            "description": "Optional upstream run identifier from an external agent system."
+          },
+          "source_event_id": {
+            "type": ["string", "null"],
+            "description": "Optional upstream event identifier from an external agent system."
           },
           "state_history": {
             "type": "array",

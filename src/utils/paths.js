@@ -75,6 +75,15 @@ function getHandoffsPath(workspaceFolder) {
   return path.join(getAgentSyncDir(workspaceFolder), 'handoffs.json')
 }
 
+/**
+ * Resolve the context capsule file path.
+ * @param {import('vscode').WorkspaceFolder} workspaceFolder
+ * @returns {string}
+ */
+function getContextCapsulePath(workspaceFolder) {
+  return path.join(getAgentSyncDir(workspaceFolder), 'context-capsule.json')
+}
+
 module.exports = {
   getTemplatesDir,
   getTrackerPath,
@@ -83,5 +92,6 @@ module.exports = {
   getStatePath,
   getRequestPath,
   getResultPath,
-  getHandoffsPath
+  getHandoffsPath,
+  getContextCapsulePath
 }

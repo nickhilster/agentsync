@@ -137,6 +137,30 @@ Clicking the status item opens AgentSync Live.
 
 In multi-root workspaces, AgentSync targets the active editor's workspace folder and labels status with the folder name.
 
+### 5. Advanced handoff and agency commands
+
+```text
+AgentSync: List Handoffs
+AgentSync: Claim Handoff
+AgentSync: Complete Handoff
+AgentSync: Generate Context Capsule
+AgentSync: Sync Agency Runs
+```
+
+These commands support:
+
+- explicit handoff lifecycle control from the command palette
+- deterministic context capsule output to `.agentsync/context-capsule.json`
+- ingesting `.agencysync/runs.json` and `.agencysync/events/**/*.json` into AgentSync handoffs
+
+Drop-zone API actions now include:
+
+- `listHandoffs`
+- `claimHandoff`
+- `completeHandoff`
+- `createHandoff`
+- `syncAgencyRuns`
+
 ## Optional Configuration
 
 AgentSync reads optional config from `.agentsync.json`:
