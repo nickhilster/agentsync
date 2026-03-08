@@ -10,5 +10,7 @@ module.exports = {
   ...require('./io'),
   ...require('./git'),
   ...require('./workspace'),
-  ...require('./workspaceSnapshot')
+  ...require('./workspaceSnapshot'),
+  ...require('./agentCatalog'),
+  ...require('./executionChannels')
 }

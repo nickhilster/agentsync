@@ -69,6 +69,18 @@
     "enableCaching": true,
     "sessionDurationWarningMinutes": 0
   },
+  "agentCatalog": {
+    "bundled": true,
+    "workspaceDir": ".agentsync/agents",
+    "categories": [
+      "engineering", "design", "marketing", "product", "project-management",
+      "support", "testing", "specialized", "spatial-computing", "strategy"
+    ]
+  },
+  "executionChannels": {
+    "preferred": "clipboard",
+    "fallback": "clipboard"
+  },
   "commands": {
     "build": "",
     "test": "",

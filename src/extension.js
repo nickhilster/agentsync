@@ -9,6 +9,7 @@ const {
   PLACEHOLDER, DEFAULT_STALE_HOURS, OPEN_HANDOFF_STATUSES,
   DEFAULT_END_SESSION_ZERO_TOUCH, DEFAULT_START_SESSION_ZERO_TOUCH,
   DEFAULT_HANDOFF_ROUTING_DEFAULTS, ROLE_LIST,
+  AGENT_CATEGORY_COLORS,
   // paths
   getTemplatesDir, getTrackerPath, getConfigPath, getAgentSyncDir,
   getStatePath, getRequestPath, getResultPath, getHandoffsPath, getContextCapsulePath,
@@ -23,12 +24,22 @@ const {
   // workspace
   getActiveWorkspaceFolder, resolveWorkspaceFolder, getWorkspaceLabelPrefix,
   // snapshot
-  WorkspaceSnapshotService
+  WorkspaceSnapshotService,
+  // agent catalog
+  buildCatalog, mapAgentToCapabilities, matchAgentsByCapabilities,
+  // execution channels
+  assembleAgentPrompt, deliverPrompt,
+  injectPersonalityToWorkspace, removePersonalityFromWorkspace
 } = require('./utils')
 
 const HOT_FILES_CACHE_TTL_MS = 4000
 const _hotFilesCache = new Map()
 let _snapshotService = null
+
+// ━━━ Agent Catalog cache ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+let _agentCatalog = null
+let _agentCatalogWatcher = null // eslint-disable-line prefer-const
+let _extensionPath = null // Set during activate()
 // ━━━ Config reader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
@@ -1668,6 +1679,10 @@ function completeHandoffRecord(workspaceFolder, handoffId, status, agentId, reas
 
   writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
   syncTrackerHandoffsSection(workspaceFolder)
+
+  // Auto-advance chain if this handoff is part of a pipeline
+  advanceChainOnCompletion(workspaceFolder, normalizedId)
+
   return { ok: true, handoffId: normalizedId, status: nextStatus }
 }
 
@@ -1683,6 +1698,8 @@ function listHandoffRecords(workspaceFolder) {
 /**
  * @param {vscode.WorkspaceFolder} workspaceFolder
  */
+// DEPRECATED: .agencysync/ sync is maintained for backward compatibility.
+// New projects should use the AgentSync agent catalog and clipboard-first execution instead.
 function getAgencySyncPaths(workspaceFolder) {
   const base = path.join(workspaceFolder.uri.fsPath, '.agencysync')
   return {
@@ -2239,6 +2256,8 @@ async function endSessionCore(
         branch,
         commit,
         prior_attempts: 0,
+        agent_personality_id: handoffData.agent_personality_id || null,
+        suggested_agent_personality_id: null,
         generated_prompt_lines: [],
         prompt_copied_to_clipboard: false,
         summary_source: summarySource,
@@ -2258,6 +2277,22 @@ async function endSessionCore(
 
       const { valid, errors } = validateHandoff(handoffRecord)
       if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
+    }
+
+    // Auto-suggest agent personality based on required capabilities
+    if (handoffRecord && !handoffRecord.suggested_agent_personality_id && !handoffRecord.no_handoff_reason) {
+      try {
+        const catalog = getAgentCatalog(workspaceFolder)
+        if (catalog && catalog.agents.length > 0) {
+          const caps = handoffRecord.required_capabilities || complexityInfo.capabilities || []
+          const matched = matchAgentsByCapabilities(catalog.agents, caps)
+          if (matched.length > 0) {
+            handoffRecord.suggested_agent_personality_id = matched[0].id
+          }
+        }
+      } catch {
+        // Non-fatal: catalog may not be loaded
+      }
     }
 
     if (automationFeatureEnabled) {
@@ -2319,6 +2354,13 @@ async function endSessionCore(
     stateLastSession.summarySource = summarySource
     stateLastSession.automationUsed = automationUsed
     stateLastSession.generatedPrompts = generatedPromptLines
+  }
+
+  // Remove active agent personality on session end
+  try {
+    removePersonalityFromWorkspace(workspaceFolder.uri.fsPath)
+  } catch {
+    // Non-fatal
   }
 
   writeStateFile(workspaceFolder, {
@@ -2853,7 +2895,43 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
           )
           return summarizeHandoffCard(h, isStale)
         })
-    }
+    },
+    agentCatalog: (() => {
+      try {
+        const catalog = getAgentCatalog(workspaceFolder)
+        if (!catalog) return { loaded: false, totalAgents: 0, categories: [] }
+        const catSummary = catalog.categories.map((cat) => ({
+          name: cat,
+          color: AGENT_CATEGORY_COLORS[cat] || '#888',
+          count: catalog.agents.filter((a) => a.category === cat).length
+        }))
+        return { loaded: true, totalAgents: catalog.agents.length, categories: catSummary }
+      } catch {
+        return { loaded: false, totalAgents: 0, categories: [] }
+      }
+    })(),
+    pipelines: (() => {
+      const chains = new Map()
+      for (const h of handoffInfo.handoffs) {
+        if (!h.chain_id) continue
+        if (!chains.has(h.chain_id)) chains.set(h.chain_id, [])
+        chains.get(h.chain_id).push(h)
+      }
+      return Array.from(chains.entries()).map(([chainId, steps]) => {
+        steps.sort((a, b) => (a.chain_step || 0) - (b.chain_step || 0))
+        return {
+          chainId,
+          total: steps[0]?.chain_total || steps.length,
+          steps: steps.map((s) => ({
+            step: s.chain_step || 0,
+            agentId: s.agent_personality_id || s.to_agents?.[0] || 'unknown',
+            status: String(s.status || 'blocked'),
+            handoffId: String(s.handoff_id || ''),
+            summary: String(s.summary || '')
+          }))
+        }
+      })
+    })()
   }
 }
 
@@ -3364,6 +3442,16 @@ function getDashboardHtml() {
         </section>
 
         <section class="card">
+          <h3>Agent Catalog</h3>
+          <div id="agentCatalogSection"></div>
+        </section>
+
+        <section class="card">
+          <h3>Pipelines</h3>
+          <div id="pipelinesSection"></div>
+        </section>
+
+        <section class="card">
           <h3>Warnings</h3>
           <ul id="warningsList" class="list"></ul>
         </section>
@@ -3735,6 +3823,113 @@ function getDashboardHtml() {
       return base + ' Try Refresh. If it persists, open AgentTracker for context.';
     }
 
+    function renderAgentCatalog(catalog) {
+      const el = byId('agentCatalogSection');
+      if (!el) return;
+      el.innerHTML = '';
+      if (!catalog || !catalog.loaded || catalog.totalAgents === 0) {
+        const empty = document.createElement('p');
+        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
+        empty.textContent = 'Agent catalog not loaded.';
+        el.appendChild(empty);
+        return;
+      }
+
+      const header = document.createElement('div');
+      header.style.cssText = 'margin-bottom:6px;font-size:12px;color:var(--muted);';
+      header.textContent = catalog.totalAgents + ' agent personalities available';
+      el.appendChild(header);
+
+      const badgeContainer = document.createElement('div');
+      badgeContainer.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';
+      (catalog.categories || []).forEach(function(cat) {
+        const badge = document.createElement('span');
+        badge.style.cssText = 'display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;' +
+          'background:' + cat.color + '22;color:' + cat.color + ';border:1px solid ' + cat.color + '44;';
+        badge.textContent = cat.name + ' (' + cat.count + ')';
+        badge.title = cat.name + ': ' + cat.count + ' agent(s)';
+        badgeContainer.appendChild(badge);
+      });
+      el.appendChild(badgeContainer);
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'margin-top:6px;display:flex;gap:6px;';
+
+      var browseBtn = document.createElement('button');
+      browseBtn.className = 'action compact-action';
+      browseBtn.textContent = 'Browse Agents';
+      browseBtn.setAttribute('data-command', 'agentsync.browseAgents');
+      actions.appendChild(browseBtn);
+
+      var runBtn = document.createElement('button');
+      runBtn.className = 'action compact-action';
+      runBtn.textContent = 'Run with Agent';
+      runBtn.setAttribute('data-command', 'agentsync.runWithAgent');
+      actions.appendChild(runBtn);
+
+      var pipelineBtn = document.createElement('button');
+      pipelineBtn.className = 'action compact-action';
+      pipelineBtn.textContent = 'Create Pipeline';
+      pipelineBtn.setAttribute('data-command', 'agentsync.createPipeline');
+      actions.appendChild(pipelineBtn);
+
+      el.appendChild(actions);
+    }
+
+    function renderPipelines(pipelines) {
+      var el = byId('pipelinesSection');
+      if (!el) return;
+      el.innerHTML = '';
+      if (!pipelines || pipelines.length === 0) {
+        var empty = document.createElement('p');
+        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
+        empty.textContent = 'No active pipelines.';
+        el.appendChild(empty);
+        return;
+      }
+
+      pipelines.forEach(function(pipeline) {
+        var row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:8px;';
+
+        var label = document.createElement('div');
+        label.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:4px;';
+        label.textContent = 'Chain: ' + pipeline.chainId;
+        row.appendChild(label);
+
+        var stepsContainer = document.createElement('div');
+        stepsContainer.style.cssText = 'display:flex;align-items:center;gap:2px;flex-wrap:wrap;';
+
+        pipeline.steps.forEach(function(step, idx) {
+          var stepEl = document.createElement('div');
+          var statusColors = {
+            blocked: '#666',
+            queued: '#ffb347',
+            in_progress: '#3b82f6',
+            merged: '#22c55e',
+            approved: '#22c55e',
+            ready_for_review: '#a855f7'
+          };
+          var bg = statusColors[step.status] || '#666';
+          stepEl.style.cssText = 'display:inline-flex;align-items:center;padding:3px 8px;border-radius:6px;font-size:11px;' +
+            'background:' + bg + '22;color:' + bg + ';border:1px solid ' + bg + '44;cursor:default;';
+          stepEl.textContent = step.step + '. ' + (step.agentId || '').split('/').pop();
+          stepEl.title = step.summary + ' (' + step.status + ')';
+          stepsContainer.appendChild(stepEl);
+
+          if (idx < pipeline.steps.length - 1) {
+            var arrow = document.createElement('span');
+            arrow.style.cssText = 'color:var(--muted);font-size:12px;margin:0 2px;';
+            arrow.textContent = '\u2192';
+            stepsContainer.appendChild(arrow);
+          }
+        });
+
+        row.appendChild(stepsContainer);
+        el.appendChild(row);
+      });
+    }
+
     function render(model) {
       if (!model || !model.hasWorkspace) {
         setViewMode('compact');
@@ -3786,6 +3981,8 @@ function getDashboardHtml() {
       renderList('handoffShared', model.handoffs.sharedWithMe, formatHandoff, 'No shared assignments');
       renderList('handoffBlocked', model.handoffs.blockedOrStale, formatHandoff, 'No blocked/stale handoffs');
       renderQueuedHandoffs(model.handoffs.queued || []);
+      renderAgentCatalog(model.agentCatalog || {});
+      renderPipelines(model.pipelines || []);
       renderList('warningsList', model.warnings, (w) => w, 'No warnings');
 
       if (!pendingCommand) {
@@ -4859,6 +5056,38 @@ async function claimHandoffCommand() {
   }
   syncTrackerHandoffsSection(workspaceFolder)
   vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${selected.label}.`)
+
+  // Show agent personality context if the handoff has one
+  const handoffRecord = listHandoffRecords(workspaceFolder).find(
+    (h) => toSingleLine(h?.handoff_id) === selected.label
+  )
+  const personalityId = handoffRecord?.agent_personality_id || handoffRecord?.suggested_agent_personality_id
+  if (personalityId) {
+    try {
+      const catalog = getAgentCatalog(workspaceFolder)
+      const agent = catalog?.agents?.find((a) => a.id === personalityId)
+      if (agent) {
+        const activateChoice = await vscode.window.showInformationMessage(
+          'This handoff suggests agent personality: ' + agent.name + '. Activate it?',
+          'Activate',
+          'View',
+          'Skip'
+        )
+        if (activateChoice === 'Activate') {
+          injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, agent)
+          vscode.window.showInformationMessage('AgentSync: Agent personality ' + agent.name + ' activated.')
+        } else if (activateChoice === 'View') {
+          const doc = await vscode.workspace.openTextDocument({
+            content: '# ' + agent.name + '\n\n' + agent.promptBody,
+            language: 'markdown'
+          })
+          await vscode.window.showTextDocument(doc, { preview: true })
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
 }
 
 /**
@@ -5705,14 +5934,346 @@ class AgentSyncHotFileDecorationProvider {
   }
 }
 
+// ━━━ Agent Catalog ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Initialize or refresh the in-memory agent catalog.
+ * Loads bundled agents from templates/agents/ and optionally workspace agents.
+ * @param {vscode.WorkspaceFolder | null} workspaceFolder
+ */
+function loadAgentCatalog(workspaceFolder) {
+  const base = _extensionPath || __dirname
+  const bundledDir = path.join(base, 'templates', 'agents')
+  const rootDirs = [bundledDir]
+
+  if (workspaceFolder) {
+    const wsAgentsDir = path.join(workspaceFolder.uri.fsPath, '.agentsync', 'agents')
+    if (fs.existsSync(wsAgentsDir)) {
+      rootDirs.push(wsAgentsDir)
+    }
+  }
+
+  _agentCatalog = buildCatalog({ rootDirs })
+  return _agentCatalog
+}
+
+/**
+ * Get the cached agent catalog, loading if needed.
+ * @param {vscode.WorkspaceFolder | null} [workspaceFolder]
+ * @returns {{ schemaVersion: string, agents: object[], categories: string[], lastIndexedAt: string }}
+ */
+function getAgentCatalog(workspaceFolder) {
+  if (!_agentCatalog) loadAgentCatalog(workspaceFolder || null)
+  return _agentCatalog
+}
+
+/**
+ * Browse agents command -- QuickPick grouped by category.
+ */
+async function browseAgentsCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  const catalog = getAgentCatalog(workspaceFolder)
+
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  const items = []
+  const sortedCategories = [...catalog.categories].sort()
+  for (const category of sortedCategories) {
+    const categoryAgents = catalog.agents.filter((a) => a.category === category)
+    if (categoryAgents.length === 0) continue
+
+    items.push({
+      label: category.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      kind: vscode.QuickPickItemKind.Separator
+    })
+
+    for (const agent of categoryAgents) {
+      items.push({
+        label: agent.name,
+        description: agent.category,
+        detail: agent.description,
+        agentId: agent.id
+      })
+    }
+  }
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Browse agent personalities (' + catalog.agents.length + ' available)',
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  })
+  if (!selected || !selected.agentId) return
+
+  // Open agent prompt body in a read-only preview
+  const agent = catalog.agents.find((a) => a.id === selected.agentId)
+  if (!agent) return
+
+  const doc = await vscode.workspace.openTextDocument({
+    content: '# ' + agent.name + '\n\n**Category:** ' + agent.category +
+      '\n**Description:** ' + agent.description +
+      '\n**ID:** ' + agent.id +
+      '\n\n---\n\n' + agent.promptBody,
+    language: 'markdown'
+  })
+  await vscode.window.showTextDocument(doc, { preview: true })
+}
+
+/**
+ * Run with agent command -- select agent, enter instruction, copy prompt to clipboard.
+ */
+async function runWithAgentCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  const catalog = getAgentCatalog(workspaceFolder)
+
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  // Step 1: Select agent
+  const items = catalog.agents.map((agent) => ({
+    label: agent.name,
+    description: agent.category,
+    detail: agent.description,
+    agentId: agent.id
+  }))
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select an agent personality',
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  })
+  if (!selected || !selected.agentId) return
+
+  const agent = catalog.agents.find((a) => a.id === selected.agentId)
+  if (!agent) return
+
+  // Step 2: Enter instruction
+  const instruction = await vscode.window.showInputBox({
+    prompt: 'Enter your instruction for ' + agent.name,
+    placeHolder: 'Example: Refactor the authentication module to use JWT tokens',
+    ignoreFocusOut: true
+  })
+  if (instruction === undefined || !instruction.trim()) return
+
+  // Step 3: Assemble and deliver prompt
+  const assembledPrompt = assembleAgentPrompt(agent, instruction.trim())
+  const result = await deliverPrompt('clipboard', { vscodeEnv: vscode.env }, assembledPrompt)
+
+  if (result.ok) {
+    vscode.window.showInformationMessage(
+      'AgentSync: Agent prompt copied to clipboard \u2014 paste into your AI tool. Agent: ' + agent.name
+    )
+  } else {
+    vscode.window.showErrorMessage('AgentSync: Failed to copy prompt to clipboard.')
+  }
+}
+
+/**
+ * Create a pipeline (chain) of agents for sequential execution.
+ */
+async function createPipelineCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+
+  const catalog = getAgentCatalog(workspaceFolder)
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  // Step 1: Enter pipeline goal
+  const goalInput = await vscode.window.showInputBox({
+    prompt: 'Enter the pipeline goal / instruction',
+    placeHolder: 'Example: Design, implement, and test a new REST endpoint',
+    ignoreFocusOut: true
+  })
+  if (goalInput === undefined || !goalInput.trim()) return
+  const goal = goalInput.trim()
+
+  // Step 2: Select agents in sequence
+  const selectedAgents = []
+  let pipelineBuilding = true
+  while (pipelineBuilding) {
+    const agentItems = [
+      { label: '$(check) Done', description: 'Finish building the pipeline', agentId: null },
+      ...catalog.agents.map((agent) => ({
+        label: agent.name,
+        description: agent.category + (selectedAgents.length > 0 ? '' : ' (first step)'),
+        detail: agent.description,
+        agentId: agent.id
+      }))
+    ]
+
+    const stepLabel = selectedAgents.length === 0
+      ? 'Select the first agent in the pipeline'
+      : 'Select step ' + (selectedAgents.length + 1) + ' (or Done to finish). Current: ' +
+        selectedAgents.map((a) => a.name).join(' -> ')
+
+    const pick = await vscode.window.showQuickPick(agentItems, {
+      placeHolder: stepLabel,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true
+    })
+    if (!pick) return // cancelled
+
+    if (!pick.agentId) {
+      if (selectedAgents.length < 2) {
+        vscode.window.showWarningMessage('AgentSync: Pipeline needs at least 2 agents.')
+        continue
+      }
+      pipelineBuilding = false
+      continue
+    }
+
+    const agent = catalog.agents.find((a) => a.id === pick.agentId)
+    if (agent) selectedAgents.push(agent)
+  }
+
+  // Step 3: Create linked handoff chain
+  const store = readHandoffs(workspaceFolder)
+  const allHandoffs = store.handoffs
+  const now = new Date().toISOString()
+  const chainId = 'CHAIN-' + now.slice(0, 10).replace(/-/g, '') + '-' +
+    Math.random().toString(36).slice(2, 8)
+
+  const state = readStateFile(workspaceFolder) || {}
+  const currentAgent = canonicalAgentId(
+    state?.activeSession?.agent || state?.lastSession?.agent || 'user'
+  )
+
+  const chainHandoffs = selectedAgents.map((agent, index) => {
+    const dateStr = now.slice(0, 10).replace(/-/g, '')
+    const seq = String(allHandoffs.length + index + 1).padStart(3, '0')
+    const handoffId = 'HO-' + dateStr + '-' + seq
+
+    const isFirst = index === 0
+    const isLast = index === selectedAgents.length - 1
+    const nextAgent = isLast ? null : selectedAgents[index + 1]
+
+    return {
+      handoff_id: handoffId,
+      task_id: null,
+      from_agent: isFirst ? currentAgent : selectedAgents[index - 1].id,
+      to_agents: [agent.id],
+      owner_mode: 'single',
+      status: isFirst ? 'queued' : 'blocked',
+      required_capabilities: mapAgentToCapabilities(agent),
+      summary: 'Pipeline step ' + (index + 1) + '/' + selectedAgents.length + ': ' + goal,
+      notes: 'Agent: ' + agent.name + ' (' + agent.category + ')',
+      no_handoff_reason: null,
+      files: [],
+      branch: runGit(workspaceFolder, ['rev-parse', '--abbrev-ref', 'HEAD']) || PLACEHOLDER,
+      commit: runGit(workspaceFolder, ['rev-parse', '--short', 'HEAD']) || PLACEHOLDER,
+      prior_attempts: 0,
+      agent_personality_id: agent.id,
+      chain_id: chainId,
+      chain_step: index + 1,
+      chain_total: selectedAgents.length,
+      next_chain_agent_id: nextAgent ? nextAgent.id : null,
+      created_at: now,
+      updated_at: now,
+      state_history: [
+        {
+          status: isFirst ? 'queued' : 'blocked',
+          agent: currentAgent,
+          timestamp: now,
+          reason: 'pipeline created'
+        }
+      ]
+    }
+  })
+
+  // Validate each handoff
+  for (const handoff of chainHandoffs) {
+    const { valid, errors } = validateHandoff(handoff)
+    if (!valid) {
+      vscode.window.showErrorMessage(
+        'AgentSync: Invalid pipeline handoff: ' + errors.join('; ')
+      )
+      return
+    }
+  }
+
+  const updatedHandoffs = [...allHandoffs, ...chainHandoffs]
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: updatedHandoffs })
+  syncTrackerHandoffsSection(workspaceFolder)
+
+  vscode.window.showInformationMessage(
+    'AgentSync: Pipeline created with ' + selectedAgents.length + ' steps. Chain ID: ' + chainId
+  )
+}
+
+/**
+ * When a chain handoff is completed, auto-advance the next step.
+ * Call this after completeHandoffRecord.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} completedHandoffId
+ */
+function advanceChainOnCompletion(workspaceFolder, completedHandoffId) {
+  const store = readHandoffs(workspaceFolder)
+  const completed = store.handoffs.find(
+    (h) => toSingleLine(h?.handoff_id) === toSingleLine(completedHandoffId)
+  )
+  if (!completed || !completed.chain_id) return
+
+  const completedStatus = String(completed.status || '').toLowerCase()
+  const isTerminal = completedStatus === 'merged' || completedStatus === 'approved' ||
+    completedStatus === 'ready_for_review'
+  if (!isTerminal) return
+
+  const nextStep = completed.chain_step + 1
+  const nextHandoff = store.handoffs.find(
+    (h) =>
+      h.chain_id === completed.chain_id &&
+      h.chain_step === nextStep &&
+      String(h.status || '').toLowerCase() === 'blocked'
+  )
+  if (!nextHandoff) return
+
+  const now = new Date().toISOString()
+  nextHandoff.status = 'queued'
+  nextHandoff.updated_at = now
+  nextHandoff.notes = (nextHandoff.notes || '') +
+    ' | Previous step completed: ' + toSingleLine(completed.summary || '')
+  if (!Array.isArray(nextHandoff.state_history)) nextHandoff.state_history = []
+  nextHandoff.state_history.push({
+    status: 'queued',
+    agent: 'system',
+    timestamp: now,
+    reason: 'chain auto-advance from ' + completedHandoffId
+  })
+
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: store.handoffs })
+  syncTrackerHandoffsSection(workspaceFolder)
+}
+
 /**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
+  _extensionPath = context.extensionPath
   // â”€â”€ Status bar â”€â”€
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99)
   statusItem.command = 'agentsync.openDashboard'
   updateStatusBar(statusItem)
+
+  // ── Agent Catalog initialization ──
+  try {
+    const wsFolder = getActiveWorkspaceFolder()
+    loadAgentCatalog(wsFolder)
+  } catch {
+    // Non-fatal -- catalog will be loaded on first use
+  }
 
   const dashboardProvider = new AgentSyncDashboardViewProvider(context)
   const dashboardView = vscode.window.registerWebviewViewProvider(
@@ -6064,6 +6625,17 @@ function activate(context) {
     scheduleRefresh()
   })
 
+  // ── Agent Catalog commands ──
+  const browseAgentsCmd = vscode.commands.registerCommand(
+    'agentsync.browseAgents', () => browseAgentsCommand()
+  )
+  const runWithAgentCmd = vscode.commands.registerCommand(
+    'agentsync.runWithAgent', () => runWithAgentCommand()
+  )
+  const createPipelineCmd = vscode.commands.registerCommand(
+    'agentsync.createPipeline', () => createPipelineCommand()
+  )
+
   // â”€â”€ Startup automation â”€â”€
   setTimeout(() => checkSessionOnStartup(context), 3000)
   startSessionReminderTimer(context)
@@ -6122,7 +6694,10 @@ function activate(context) {
     detectCmd,
     contextStatusCmd,
     setRoleCmd,
-    refreshCmd
+    refreshCmd,
+    browseAgentsCmd,
+    runWithAgentCmd,
+    createPipelineCmd
   )
 }
 

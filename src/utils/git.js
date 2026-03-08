@@ -115,6 +115,27 @@ function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, pri
     tier = 'lead'
     caps.push('heavy edit')
   }
+
+  // Infer domain capabilities from file extensions in hot files
+  if (hotFiles && hotFiles.length > 0) {
+    const extensions = new Set(
+      hotFiles.map((f) => {
+        const dot = f.lastIndexOf('.')
+        return dot >= 0 ? f.slice(dot).toLowerCase() : ''
+      }).filter(Boolean)
+    )
+    const testFiles = hotFiles.filter((f) =>
+      /\.(test|spec|e2e)\./i.test(f) || /\/__tests__\//i.test(f) || /\/test\//i.test(f)
+    )
+    if (testFiles.length > 0) caps.push('testing')
+    if (extensions.has('.css') || extensions.has('.scss') || extensions.has('.figma')) caps.push('design')
+    if (extensions.has('.md') || extensions.has('.txt') || extensions.has('.rst')) caps.push('documentation')
+    if (extensions.has('.yml') || extensions.has('.yaml') || extensions.has('.dockerfile') ||
+        hotFiles.some((f) => f.includes('Dockerfile') || f.includes('.github/workflows'))) {
+      caps.push('automation')
+    }
+  }
+
   const reason = caps.length ? 'Detected ' + caps.join(', ') : 'Routine change'
   return { tier, capabilities: caps, reason }
 }

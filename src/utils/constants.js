@@ -36,6 +36,44 @@ const ROLE_LIST = [
   'systems_designer'
 ]
 
+// ━━━ Agent Catalog constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const AGENT_CATEGORY_COLORS = Object.freeze({
+  engineering: '#00d4aa',
+  design: '#a855f7',
+  marketing: '#3b82f6',
+  product: '#22c55e',
+  'project-management': '#eab308',
+  support: '#14b8a6',
+  testing: '#f97316',
+  specialized: '#6366f1',
+  'spatial-computing': '#06ffd0',
+  strategy: '#10b981'
+})
+
+const DEFAULT_AGENT_CATALOG_CONFIG = Object.freeze({
+  bundled: true,
+  workspaceDir: '.agentsync/agents',
+  categories: [
+    'engineering', 'design', 'marketing', 'product', 'project-management',
+    'support', 'testing', 'specialized', 'spatial-computing', 'strategy'
+  ]
+})
+
+const DEFAULT_EXECUTION_CHANNELS_CONFIG = Object.freeze({
+  preferred: 'clipboard',
+  fallback: 'clipboard'
+})
+
+// ━━━ Pipeline / Chain constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const CHAIN_STATUSES = Object.freeze({
+  BLOCKED: 'blocked',
+  QUEUED: 'queued',
+  IN_PROGRESS: 'in_progress',
+  COMPLETED: 'merged'
+})
+
 module.exports = {
   PLACEHOLDER,
   EM_DASH,
@@ -44,5 +82,9 @@ module.exports = {
   DEFAULT_END_SESSION_ZERO_TOUCH,
   DEFAULT_START_SESSION_ZERO_TOUCH,
   DEFAULT_HANDOFF_ROUTING_DEFAULTS,
-  ROLE_LIST
+  ROLE_LIST,
+  AGENT_CATEGORY_COLORS,
+  DEFAULT_AGENT_CATALOG_CONFIG,
+  DEFAULT_EXECUTION_CHANNELS_CONFIG,
+  CHAIN_STATUSES
 }

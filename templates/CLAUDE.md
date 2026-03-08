@@ -51,3 +51,14 @@ AgentSync reads optional commands from `.agentsync.json` in the repository root:
 - `commands.deploy`
 
 When configured, `AgentSync: End Session` runs these checks and writes pass/fail to **Current Health**.
+
+## Agent Catalog
+
+AgentSync includes a catalog of 55+ agent personalities across 10 categories (engineering, design, marketing, product, project-management, support, testing, specialized, spatial-computing, strategy).
+
+- **Browse agents**: Run `AgentSync: Browse Agent Catalog` to explore available personalities.
+- **Run with agent**: Run `AgentSync: Run with Agent` to assemble a prompt with a specific agent personality and copy it to your clipboard.
+- **Create pipeline**: Run `AgentSync: Create Pipeline` to chain multiple agents into a sequential workflow.
+- **Workspace agents**: Place custom agent `.md` files in `.agentsync/agents/<category>/` to extend the catalog.
+
+When an agent personality is active, an `## Active Agent Personality` section is appended to this file. It is automatically removed when the session ends.

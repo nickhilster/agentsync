@@ -163,6 +163,21 @@
         "command": "agentsync.openTutorial",
         "title": "AgentSync: Open Interactive Tutorial",
         "icon": "$(mortar-board)"
+      },
+      {
+        "command": "agentsync.browseAgents",
+        "title": "AgentSync: Browse Agent Catalog",
+        "icon": "$(library)"
+      },
+      {
+        "command": "agentsync.runWithAgent",
+        "title": "AgentSync: Run with Agent",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "agentsync.createPipeline",
+        "title": "AgentSync: Create Pipeline",
+        "icon": "$(git-merge)"
       }
     ],
     "viewsContainers": {

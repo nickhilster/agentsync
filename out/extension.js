@@ -40,6 +40,44 @@ var require_constants = __commonJS({
       "non_technical",
       "systems_designer"
     ];
+    var AGENT_CATEGORY_COLORS2 = Object.freeze({
+      engineering: "#00d4aa",
+      design: "#a855f7",
+      marketing: "#3b82f6",
+      product: "#22c55e",
+      "project-management": "#eab308",
+      support: "#14b8a6",
+      testing: "#f97316",
+      specialized: "#6366f1",
+      "spatial-computing": "#06ffd0",
+      strategy: "#10b981"
+    });
+    var DEFAULT_AGENT_CATALOG_CONFIG = Object.freeze({
+      bundled: true,
+      workspaceDir: ".agentsync/agents",
+      categories: [
+        "engineering",
+        "design",
+        "marketing",
+        "product",
+        "project-management",
+        "support",
+        "testing",
+        "specialized",
+        "spatial-computing",
+        "strategy"
+      ]
+    });
+    var DEFAULT_EXECUTION_CHANNELS_CONFIG = Object.freeze({
+      preferred: "clipboard",
+      fallback: "clipboard"
+    });
+    var CHAIN_STATUSES = Object.freeze({
+      BLOCKED: "blocked",
+      QUEUED: "queued",
+      IN_PROGRESS: "in_progress",
+      COMPLETED: "merged"
+    });
     module2.exports = {
       PLACEHOLDER: PLACEHOLDER2,
       EM_DASH,
@@ -48,7 +86,11 @@ var require_constants = __commonJS({
       DEFAULT_END_SESSION_ZERO_TOUCH: DEFAULT_END_SESSION_ZERO_TOUCH2,
       DEFAULT_START_SESSION_ZERO_TOUCH: DEFAULT_START_SESSION_ZERO_TOUCH2,
       DEFAULT_HANDOFF_ROUTING_DEFAULTS: DEFAULT_HANDOFF_ROUTING_DEFAULTS2,
-      ROLE_LIST: ROLE_LIST2
+      ROLE_LIST: ROLE_LIST2,
+      AGENT_CATEGORY_COLORS: AGENT_CATEGORY_COLORS2,
+      DEFAULT_AGENT_CATALOG_CONFIG,
+      DEFAULT_EXECUTION_CHANNELS_CONFIG,
+      CHAIN_STATUSES
     };
   }
 });
@@ -311,6 +353,23 @@ var require_git = __commonJS({
         tier = "lead";
         caps.push("heavy edit");
       }
+      if (hotFiles && hotFiles.length > 0) {
+        const extensions = new Set(
+          hotFiles.map((f) => {
+            const dot = f.lastIndexOf(".");
+            return dot >= 0 ? f.slice(dot).toLowerCase() : "";
+          }).filter(Boolean)
+        );
+        const testFiles = hotFiles.filter(
+          (f) => /\.(test|spec|e2e)\./i.test(f) || /\/__tests__\//i.test(f) || /\/test\//i.test(f)
+        );
+        if (testFiles.length > 0) caps.push("testing");
+        if (extensions.has(".css") || extensions.has(".scss") || extensions.has(".figma")) caps.push("design");
+        if (extensions.has(".md") || extensions.has(".txt") || extensions.has(".rst")) caps.push("documentation");
+        if (extensions.has(".yml") || extensions.has(".yaml") || extensions.has(".dockerfile") || hotFiles.some((f) => f.includes("Dockerfile") || f.includes(".github/workflows"))) {
+          caps.push("automation");
+        }
+      }
       const reason = caps.length ? "Detected " + caps.join(", ") : "Routine change";
       return { tier, capabilities: caps, reason };
     }
@@ -532,6 +591,428 @@ var require_workspaceSnapshot = __commonJS({
   }
 });
 
+// src/utils/agentCatalog.js
+var require_agentCatalog = __commonJS({
+  "src/utils/agentCatalog.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var DEFAULT_CATEGORY_DIRS = [
+      "engineering",
+      "design",
+      "marketing",
+      "product",
+      "project-management",
+      "support",
+      "testing",
+      "specialized",
+      "spatial-computing",
+      "strategy"
+    ];
+    var CATEGORY_COLOR_FALLBACKS = {
+      engineering: "cyan",
+      design: "purple",
+      marketing: "blue",
+      product: "green",
+      "project-management": "gold",
+      support: "teal",
+      testing: "orange",
+      specialized: "indigo",
+      "spatial-computing": "neon-cyan",
+      strategy: "emerald"
+    };
+    var CATEGORY_CAPABILITY_MAP = {
+      engineering: ["implementation", "architecture"],
+      design: ["design", "ux"],
+      marketing: ["content", "marketing"],
+      product: ["product_planning", "analysis"],
+      "project-management": ["coordination", "planning"],
+      support: ["documentation", "support"],
+      testing: ["testing", "qa"],
+      specialized: ["data", "automation"],
+      "spatial-computing": ["xr", "spatial"],
+      strategy: ["strategy", "analysis"]
+    };
+    var FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+    function parseFrontmatter(content) {
+      const warnings = [];
+      const match = content.match(FRONTMATTER_REGEX);
+      if (!match) {
+        return { frontmatter: {}, body: content, warnings: ["Frontmatter block is missing."] };
+      }
+      const frontmatterBlock = match[1] || "";
+      const body = content.slice(match[0].length);
+      const frontmatter = {};
+      for (const rawLine of frontmatterBlock.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+        const separatorIndex = line.indexOf(":");
+        if (separatorIndex === -1) {
+          warnings.push('Invalid frontmatter line: "' + line + '"');
+          continue;
+        }
+        const key = line.slice(0, separatorIndex).trim();
+        const value = line.slice(separatorIndex + 1).trim();
+        if (!key) {
+          warnings.push('Frontmatter key is empty in line: "' + line + '"');
+          continue;
+        }
+        frontmatter[key] = stripWrappingQuotes(value);
+      }
+      return { frontmatter, body, warnings };
+    }
+    function normalizePath(value) {
+      return value.replace(/\\/g, "/");
+    }
+    function stripWrappingQuotes(value) {
+      if (!value) return value;
+      const hasDoubleQuotes = value.startsWith('"') && value.endsWith('"');
+      const hasSingleQuotes = value.startsWith("'") && value.endsWith("'");
+      if (hasDoubleQuotes || hasSingleQuotes) return value.slice(1, -1);
+      return value;
+    }
+    function parseTools(rawTools) {
+      if (!rawTools || !rawTools.trim()) return [];
+      return rawTools.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
+    }
+    function extractFirstHeading(body) {
+      const headingMatch = body.match(/^#\s+(.+)$/m);
+      if (!headingMatch) return "";
+      return (headingMatch[1] || "").trim();
+    }
+    function headingContainsName(heading, name) {
+      return heading.toLowerCase().includes(name.toLowerCase());
+    }
+    function listMarkdownFilesSync(rootDir) {
+      const files = [];
+      function walk(currentDir) {
+        let entries;
+        try {
+          entries = fs2.readdirSync(currentDir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          const absolutePath = path2.join(currentDir, entry.name);
+          if (entry.isDirectory()) {
+            walk(absolutePath);
+          } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+            files.push(absolutePath);
+          }
+        }
+      }
+      walk(rootDir);
+      return files.sort();
+    }
+    function parseAgentFile(content, context) {
+      const { frontmatter, body, warnings } = parseFrontmatter(content);
+      const validationWarnings = [...warnings];
+      const fallbackName = path2.basename(context.filePath, ".md");
+      const name = (frontmatter.name || "").trim() || fallbackName;
+      if (!(frontmatter.name || "").trim()) {
+        validationWarnings.push("Missing frontmatter field: name");
+      }
+      const description = (frontmatter.description || "").trim() || "No description provided.";
+      if (!(frontmatter.description || "").trim()) {
+        validationWarnings.push("Missing frontmatter field: description");
+      }
+      const categoryFallback = CATEGORY_COLOR_FALLBACKS[context.category] || "slate";
+      const color = (frontmatter.color || "").trim() || categoryFallback;
+      if (!(frontmatter.color || "").trim()) {
+        validationWarnings.push('Missing frontmatter field: color. Using fallback "' + categoryFallback + '".');
+      }
+      const tools = parseTools(frontmatter.tools);
+      const title = extractFirstHeading(body);
+      if (title && !headingContainsName(title, name)) {
+        validationWarnings.push(
+          'Heading/title mismatch. First heading "' + title + '" does not include agent name "' + name + '".'
+        );
+      }
+      return {
+        id: context.category + "/" + path2.basename(context.sourcePath, ".md"),
+        name,
+        description,
+        category: context.category,
+        color,
+        tools,
+        promptBody: body.trim(),
+        sourcePath: context.sourcePath,
+        validationWarnings,
+        frontmatter,
+        title
+      };
+    }
+    function annotateDuplicateNameWarnings(agents) {
+      const groups = /* @__PURE__ */ new Map();
+      for (const agent of agents) {
+        const key = agent.name.trim().toLowerCase();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(agent);
+      }
+      for (const [nameKey, groupedAgents] of groups) {
+        if (groupedAgents.length < 2) continue;
+        for (const agent of groupedAgents) {
+          agent.validationWarnings.push(
+            'Duplicate agent name detected ("' + nameKey + '"). Review uniqueness across categories.'
+          );
+        }
+      }
+    }
+    function buildCatalog2(options) {
+      const categories = Array.isArray(options.categories) && options.categories.length > 0 ? options.categories : [...DEFAULT_CATEGORY_DIRS];
+      const rootDirs = Array.isArray(options.rootDirs) ? options.rootDirs : [options.rootDir || "."];
+      const agents = [];
+      const seenIds = /* @__PURE__ */ new Set();
+      for (const rootDir of rootDirs) {
+        if (!fs2.existsSync(rootDir)) continue;
+        for (const category of categories) {
+          const categoryDir = path2.join(rootDir, category);
+          if (!fs2.existsSync(categoryDir)) continue;
+          const markdownFiles = listMarkdownFilesSync(categoryDir);
+          for (const filePath of markdownFiles) {
+            let content;
+            try {
+              content = fs2.readFileSync(filePath, "utf8");
+            } catch {
+              continue;
+            }
+            const relativePath = normalizePath(path2.relative(rootDir, filePath));
+            const agent = parseAgentFile(content, {
+              category,
+              sourcePath: relativePath,
+              filePath
+            });
+            if (seenIds.has(agent.id)) {
+              const idx = agents.findIndex((a) => a.id === agent.id);
+              if (idx >= 0) agents[idx] = agent;
+            } else {
+              seenIds.add(agent.id);
+              agents.push(agent);
+            }
+          }
+        }
+      }
+      annotateDuplicateNameWarnings(agents);
+      return {
+        schemaVersion: "1.0.0",
+        agents,
+        categories: Array.from(new Set(agents.map((a) => a.category))).sort(),
+        lastIndexedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    function createCatalogWatcher(options, onChange) {
+      const categories = Array.isArray(options.categories) && options.categories.length > 0 ? options.categories : [...DEFAULT_CATEGORY_DIRS];
+      const rootDirs = Array.isArray(options.rootDirs) ? options.rootDirs : [options.rootDir || "."];
+      const watchers = [];
+      let timer = null;
+      const scheduleRefresh = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          try {
+            const updated = buildCatalog2(options);
+            onChange(updated);
+          } catch {
+          }
+        }, 200);
+      };
+      for (const rootDir of rootDirs) {
+        for (const category of categories) {
+          const categoryDir = path2.join(rootDir, category);
+          if (!fs2.existsSync(categoryDir)) continue;
+          try {
+            const watcher = fs2.watch(categoryDir, { recursive: true }, scheduleRefresh);
+            watchers.push(watcher);
+          } catch {
+          }
+        }
+      }
+      return {
+        close: () => {
+          if (timer) clearTimeout(timer);
+          for (const watcher of watchers) {
+            watcher.close();
+          }
+        }
+      };
+    }
+    function createSystemPrompt(agent) {
+      return [
+        "You are " + agent.name + ".",
+        agent.description,
+        "Follow your role definition and deliver concise, actionable output.",
+        "If handing off to another agent, provide a clear summary of decisions and outputs."
+      ].join("\n\n");
+    }
+    function createPrompt(agent, userInstruction, previousOutput, contextFiles) {
+      const lines = [
+        "## Agent Prompt Body",
+        agent.promptBody,
+        "",
+        "## User Instruction",
+        userInstruction
+      ];
+      if (contextFiles && contextFiles.length > 0) {
+        lines.push("", "## Context Files", ...contextFiles.map((entry) => "- " + entry));
+      }
+      if (previousOutput && previousOutput.trim()) {
+        lines.push("", "## Previous Agent Output", previousOutput);
+      }
+      return lines.join("\n");
+    }
+    function mapAgentToCapabilities2(agentDef) {
+      if (!agentDef || !agentDef.category) return [];
+      return CATEGORY_CAPABILITY_MAP[agentDef.category] || [];
+    }
+    function matchAgentsByCapabilities2(agents, requiredCapabilities) {
+      if (!requiredCapabilities || requiredCapabilities.length === 0) return [];
+      const requiredSet = new Set(requiredCapabilities.map((c) => c.toLowerCase()));
+      const scored = agents.map((agent) => {
+        const agentCaps = mapAgentToCapabilities2(agent);
+        const matchCount = agentCaps.filter((c) => requiredSet.has(c.toLowerCase())).length;
+        return { agent, score: matchCount };
+      });
+      return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).map((s) => s.agent);
+    }
+    module2.exports = {
+      DEFAULT_CATEGORY_DIRS,
+      CATEGORY_COLOR_FALLBACKS,
+      CATEGORY_CAPABILITY_MAP,
+      buildCatalog: buildCatalog2,
+      createCatalogWatcher,
+      parseFrontmatter,
+      parseAgentFile,
+      createSystemPrompt,
+      createPrompt,
+      mapAgentToCapabilities: mapAgentToCapabilities2,
+      matchAgentsByCapabilities: matchAgentsByCapabilities2
+    };
+  }
+});
+
+// src/utils/executionChannels.js
+var require_executionChannels = __commonJS({
+  "src/utils/executionChannels.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { createSystemPrompt, createPrompt } = require_agentCatalog();
+    function assembleAgentPrompt2(agent, instruction, options = {}) {
+      const systemPrompt = createSystemPrompt(agent);
+      const userPrompt = createPrompt(
+        agent,
+        instruction,
+        options.previousOutput || "",
+        options.contextFiles
+      );
+      return [
+        "# System Prompt",
+        "",
+        systemPrompt,
+        "",
+        "---",
+        "",
+        userPrompt
+      ].join("\n");
+    }
+    async function copyToClipboard(vscodeEnv, assembledPrompt) {
+      try {
+        await vscodeEnv.clipboard.writeText(assembledPrompt);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    function writeToDropZone(workspaceRoot, assembledPrompt) {
+      try {
+        const agentSyncDir = path2.join(workspaceRoot, ".agentsync");
+        fs2.mkdirSync(agentSyncDir, { recursive: true });
+        const promptPath = path2.join(agentSyncDir, "agent-prompt.md");
+        fs2.writeFileSync(promptPath, assembledPrompt, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    async function deliverPrompt2(channel, context, assembledPrompt) {
+      if (channel === "drop-zone" && context.workspaceRoot) {
+        const ok = writeToDropZone(context.workspaceRoot, assembledPrompt);
+        return { ok, channel: "drop-zone" };
+      }
+      if (context.vscodeEnv) {
+        const ok = await copyToClipboard(context.vscodeEnv, assembledPrompt);
+        return { ok, channel: "clipboard" };
+      }
+      return { ok: false, channel };
+    }
+    var PERSONALITY_SECTION_HEADER = "## Active Agent Personality";
+    var PERSONALITY_SECTION_REGEX = /\n## Active Agent Personality[\s\S]*?(?=\n## [^\n]|\n# [^\n]|$)/;
+    function injectPersonalitySection(filePath, agent) {
+      let content = "";
+      try {
+        content = fs2.readFileSync(filePath, "utf8");
+      } catch {
+        return;
+      }
+      content = content.replace(PERSONALITY_SECTION_REGEX, "");
+      const section = [
+        "",
+        PERSONALITY_SECTION_HEADER,
+        "",
+        "**Agent:** " + agent.name + " (" + agent.id + ")",
+        "**Category:** " + agent.category,
+        "**Description:** " + agent.description,
+        "",
+        agent.promptBody,
+        ""
+      ].join("\n");
+      content += section;
+      fs2.writeFileSync(filePath, content, "utf8");
+    }
+    function removePersonalitySection(filePath) {
+      let content = "";
+      try {
+        content = fs2.readFileSync(filePath, "utf8");
+      } catch {
+        return;
+      }
+      const updated = content.replace(PERSONALITY_SECTION_REGEX, "");
+      if (updated !== content) {
+        fs2.writeFileSync(filePath, updated, "utf8");
+      }
+    }
+    function injectPersonalityToWorkspace2(workspaceRoot, agent) {
+      const files = [
+        path2.join(workspaceRoot, "CLAUDE.md"),
+        path2.join(workspaceRoot, "AGENTS.md"),
+        path2.join(workspaceRoot, ".github", "copilot-instructions.md")
+      ];
+      for (const filePath of files) {
+        injectPersonalitySection(filePath, agent);
+      }
+    }
+    function removePersonalityFromWorkspace2(workspaceRoot) {
+      const files = [
+        path2.join(workspaceRoot, "CLAUDE.md"),
+        path2.join(workspaceRoot, "AGENTS.md"),
+        path2.join(workspaceRoot, ".github", "copilot-instructions.md")
+      ];
+      for (const filePath of files) {
+        removePersonalitySection(filePath);
+      }
+    }
+    module2.exports = {
+      assembleAgentPrompt: assembleAgentPrompt2,
+      copyToClipboard,
+      writeToDropZone,
+      deliverPrompt: deliverPrompt2,
+      injectPersonalitySection,
+      removePersonalitySection,
+      injectPersonalityToWorkspace: injectPersonalityToWorkspace2,
+      removePersonalityFromWorkspace: removePersonalityFromWorkspace2
+    };
+  }
+});
+
 // src/utils/index.js
 var require_utils = __commonJS({
   "src/utils/index.js"(exports2, module2) {
@@ -543,7 +1024,9 @@ var require_utils = __commonJS({
       ...require_io(),
       ...require_git(),
       ...require_workspace(),
-      ...require_workspaceSnapshot()
+      ...require_workspaceSnapshot(),
+      ...require_agentCatalog(),
+      ...require_executionChannels()
     };
   }
 });
@@ -562,6 +1045,7 @@ var {
   DEFAULT_START_SESSION_ZERO_TOUCH,
   DEFAULT_HANDOFF_ROUTING_DEFAULTS,
   ROLE_LIST,
+  AGENT_CATEGORY_COLORS,
   // paths
   getTemplatesDir,
   getTrackerPath,
@@ -599,11 +1083,22 @@ var {
   resolveWorkspaceFolder,
   getWorkspaceLabelPrefix,
   // snapshot
-  WorkspaceSnapshotService
+  WorkspaceSnapshotService,
+  // agent catalog
+  buildCatalog,
+  mapAgentToCapabilities,
+  matchAgentsByCapabilities,
+  // execution channels
+  assembleAgentPrompt,
+  deliverPrompt,
+  injectPersonalityToWorkspace,
+  removePersonalityFromWorkspace
 } = require_utils();
 var HOT_FILES_CACHE_TTL_MS = 4e3;
 var _hotFilesCache = /* @__PURE__ */ new Map();
 var _snapshotService = null;
+var _agentCatalog = null;
+var _extensionPath = null;
 function readAgentSyncConfig(workspaceFolder) {
   const settings = vscode.workspace.getConfiguration("agentsync", workspaceFolder?.uri);
   const settingsAutoStale = Number(settings.get("autoStaleSessionMinutes", 0));
@@ -1681,6 +2176,7 @@ function completeHandoffRecord(workspaceFolder, handoffId, status, agentId, reas
   }
   writeHandoffs(workspaceFolder, { version: 1, handoffs: updated });
   syncTrackerHandoffsSection(workspaceFolder);
+  advanceChainOnCompletion(workspaceFolder, normalizedId);
   return { ok: true, handoffId: normalizedId, status: nextStatus };
 }
 function listHandoffRecords(workspaceFolder) {
@@ -2090,6 +2586,8 @@ async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoff
         branch,
         commit,
         prior_attempts: 0,
+        agent_personality_id: handoffData.agent_personality_id || null,
+        suggested_agent_personality_id: null,
         generated_prompt_lines: [],
         prompt_copied_to_clipboard: false,
         summary_source: summarySource,
@@ -2107,6 +2605,19 @@ async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoff
       };
       const { valid, errors } = validateHandoff(handoffRecord);
       if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
+    }
+    if (handoffRecord && !handoffRecord.suggested_agent_personality_id && !handoffRecord.no_handoff_reason) {
+      try {
+        const catalog = getAgentCatalog(workspaceFolder);
+        if (catalog && catalog.agents.length > 0) {
+          const caps = handoffRecord.required_capabilities || complexityInfo.capabilities || [];
+          const matched = matchAgentsByCapabilities(catalog.agents, caps);
+          if (matched.length > 0) {
+            handoffRecord.suggested_agent_personality_id = matched[0].id;
+          }
+        }
+      } catch {
+      }
     }
     if (automationFeatureEnabled) {
       generatedPromptLines = buildHandoffPromptLines(handoffRecord);
@@ -2156,6 +2667,10 @@ async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoff
     stateLastSession.summarySource = summarySource;
     stateLastSession.automationUsed = automationUsed;
     stateLastSession.generatedPrompts = generatedPromptLines;
+  }
+  try {
+    removePersonalityFromWorkspace(workspaceFolder.uri.fsPath);
+  } catch {
   }
   writeStateFile(workspaceFolder, {
     sessionActive: false,
@@ -2576,7 +3091,43 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
         );
         return summarizeHandoffCard(h, isStale);
       })
-    }
+    },
+    agentCatalog: (() => {
+      try {
+        const catalog = getAgentCatalog(workspaceFolder);
+        if (!catalog) return { loaded: false, totalAgents: 0, categories: [] };
+        const catSummary = catalog.categories.map((cat) => ({
+          name: cat,
+          color: AGENT_CATEGORY_COLORS[cat] || "#888",
+          count: catalog.agents.filter((a) => a.category === cat).length
+        }));
+        return { loaded: true, totalAgents: catalog.agents.length, categories: catSummary };
+      } catch {
+        return { loaded: false, totalAgents: 0, categories: [] };
+      }
+    })(),
+    pipelines: (() => {
+      const chains = /* @__PURE__ */ new Map();
+      for (const h of handoffInfo.handoffs) {
+        if (!h.chain_id) continue;
+        if (!chains.has(h.chain_id)) chains.set(h.chain_id, []);
+        chains.get(h.chain_id).push(h);
+      }
+      return Array.from(chains.entries()).map(([chainId, steps]) => {
+        steps.sort((a, b) => (a.chain_step || 0) - (b.chain_step || 0));
+        return {
+          chainId,
+          total: steps[0]?.chain_total || steps.length,
+          steps: steps.map((s) => ({
+            step: s.chain_step || 0,
+            agentId: s.agent_personality_id || s.to_agents?.[0] || "unknown",
+            status: String(s.status || "blocked"),
+            handoffId: String(s.handoff_id || ""),
+            summary: String(s.summary || "")
+          }))
+        };
+      });
+    })()
   };
 }
 function generateContextCapsule(workspaceFolder) {
@@ -3076,6 +3627,16 @@ function getDashboardHtml() {
         </section>
 
         <section class="card">
+          <h3>Agent Catalog</h3>
+          <div id="agentCatalogSection"></div>
+        </section>
+
+        <section class="card">
+          <h3>Pipelines</h3>
+          <div id="pipelinesSection"></div>
+        </section>
+
+        <section class="card">
           <h3>Warnings</h3>
           <ul id="warningsList" class="list"></ul>
         </section>
@@ -3447,6 +4008,113 @@ function getDashboardHtml() {
       return base + ' Try Refresh. If it persists, open AgentTracker for context.';
     }
 
+    function renderAgentCatalog(catalog) {
+      const el = byId('agentCatalogSection');
+      if (!el) return;
+      el.innerHTML = '';
+      if (!catalog || !catalog.loaded || catalog.totalAgents === 0) {
+        const empty = document.createElement('p');
+        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
+        empty.textContent = 'Agent catalog not loaded.';
+        el.appendChild(empty);
+        return;
+      }
+
+      const header = document.createElement('div');
+      header.style.cssText = 'margin-bottom:6px;font-size:12px;color:var(--muted);';
+      header.textContent = catalog.totalAgents + ' agent personalities available';
+      el.appendChild(header);
+
+      const badgeContainer = document.createElement('div');
+      badgeContainer.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';
+      (catalog.categories || []).forEach(function(cat) {
+        const badge = document.createElement('span');
+        badge.style.cssText = 'display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;' +
+          'background:' + cat.color + '22;color:' + cat.color + ';border:1px solid ' + cat.color + '44;';
+        badge.textContent = cat.name + ' (' + cat.count + ')';
+        badge.title = cat.name + ': ' + cat.count + ' agent(s)';
+        badgeContainer.appendChild(badge);
+      });
+      el.appendChild(badgeContainer);
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'margin-top:6px;display:flex;gap:6px;';
+
+      var browseBtn = document.createElement('button');
+      browseBtn.className = 'action compact-action';
+      browseBtn.textContent = 'Browse Agents';
+      browseBtn.setAttribute('data-command', 'agentsync.browseAgents');
+      actions.appendChild(browseBtn);
+
+      var runBtn = document.createElement('button');
+      runBtn.className = 'action compact-action';
+      runBtn.textContent = 'Run with Agent';
+      runBtn.setAttribute('data-command', 'agentsync.runWithAgent');
+      actions.appendChild(runBtn);
+
+      var pipelineBtn = document.createElement('button');
+      pipelineBtn.className = 'action compact-action';
+      pipelineBtn.textContent = 'Create Pipeline';
+      pipelineBtn.setAttribute('data-command', 'agentsync.createPipeline');
+      actions.appendChild(pipelineBtn);
+
+      el.appendChild(actions);
+    }
+
+    function renderPipelines(pipelines) {
+      var el = byId('pipelinesSection');
+      if (!el) return;
+      el.innerHTML = '';
+      if (!pipelines || pipelines.length === 0) {
+        var empty = document.createElement('p');
+        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
+        empty.textContent = 'No active pipelines.';
+        el.appendChild(empty);
+        return;
+      }
+
+      pipelines.forEach(function(pipeline) {
+        var row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:8px;';
+
+        var label = document.createElement('div');
+        label.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:4px;';
+        label.textContent = 'Chain: ' + pipeline.chainId;
+        row.appendChild(label);
+
+        var stepsContainer = document.createElement('div');
+        stepsContainer.style.cssText = 'display:flex;align-items:center;gap:2px;flex-wrap:wrap;';
+
+        pipeline.steps.forEach(function(step, idx) {
+          var stepEl = document.createElement('div');
+          var statusColors = {
+            blocked: '#666',
+            queued: '#ffb347',
+            in_progress: '#3b82f6',
+            merged: '#22c55e',
+            approved: '#22c55e',
+            ready_for_review: '#a855f7'
+          };
+          var bg = statusColors[step.status] || '#666';
+          stepEl.style.cssText = 'display:inline-flex;align-items:center;padding:3px 8px;border-radius:6px;font-size:11px;' +
+            'background:' + bg + '22;color:' + bg + ';border:1px solid ' + bg + '44;cursor:default;';
+          stepEl.textContent = step.step + '. ' + (step.agentId || '').split('/').pop();
+          stepEl.title = step.summary + ' (' + step.status + ')';
+          stepsContainer.appendChild(stepEl);
+
+          if (idx < pipeline.steps.length - 1) {
+            var arrow = document.createElement('span');
+            arrow.style.cssText = 'color:var(--muted);font-size:12px;margin:0 2px;';
+            arrow.textContent = '\u2192';
+            stepsContainer.appendChild(arrow);
+          }
+        });
+
+        row.appendChild(stepsContainer);
+        el.appendChild(row);
+      });
+    }
+
     function render(model) {
       if (!model || !model.hasWorkspace) {
         setViewMode('compact');
@@ -3498,6 +4166,8 @@ function getDashboardHtml() {
       renderList('handoffShared', model.handoffs.sharedWithMe, formatHandoff, 'No shared assignments');
       renderList('handoffBlocked', model.handoffs.blockedOrStale, formatHandoff, 'No blocked/stale handoffs');
       renderQueuedHandoffs(model.handoffs.queued || []);
+      renderAgentCatalog(model.agentCatalog || {});
+      renderPipelines(model.pipelines || []);
       renderList('warningsList', model.warnings, (w) => w, 'No warnings');
 
       if (!pendingCommand) {
@@ -4408,6 +5078,35 @@ async function claimHandoffCommand() {
   }
   syncTrackerHandoffsSection(workspaceFolder);
   vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${selected.label}.`);
+  const handoffRecord = listHandoffRecords(workspaceFolder).find(
+    (h) => toSingleLine(h?.handoff_id) === selected.label
+  );
+  const personalityId = handoffRecord?.agent_personality_id || handoffRecord?.suggested_agent_personality_id;
+  if (personalityId) {
+    try {
+      const catalog = getAgentCatalog(workspaceFolder);
+      const agent2 = catalog?.agents?.find((a) => a.id === personalityId);
+      if (agent2) {
+        const activateChoice = await vscode.window.showInformationMessage(
+          "This handoff suggests agent personality: " + agent2.name + ". Activate it?",
+          "Activate",
+          "View",
+          "Skip"
+        );
+        if (activateChoice === "Activate") {
+          injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, agent2);
+          vscode.window.showInformationMessage("AgentSync: Agent personality " + agent2.name + " activated.");
+        } else if (activateChoice === "View") {
+          const doc = await vscode.workspace.openTextDocument({
+            content: "# " + agent2.name + "\n\n" + agent2.promptBody,
+            language: "markdown"
+          });
+          await vscode.window.showTextDocument(doc, { preview: true });
+        }
+      }
+    } catch {
+    }
+  }
 }
 async function completeHandoffCommand() {
   const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
@@ -5046,10 +5745,251 @@ var AgentSyncHotFileDecorationProvider = class {
     );
   }
 };
+function loadAgentCatalog(workspaceFolder) {
+  const base = _extensionPath || __dirname;
+  const bundledDir = path.join(base, "templates", "agents");
+  const rootDirs = [bundledDir];
+  if (workspaceFolder) {
+    const wsAgentsDir = path.join(workspaceFolder.uri.fsPath, ".agentsync", "agents");
+    if (fs.existsSync(wsAgentsDir)) {
+      rootDirs.push(wsAgentsDir);
+    }
+  }
+  _agentCatalog = buildCatalog({ rootDirs });
+  return _agentCatalog;
+}
+function getAgentCatalog(workspaceFolder) {
+  if (!_agentCatalog) loadAgentCatalog(workspaceFolder || null);
+  return _agentCatalog;
+}
+async function browseAgentsCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
+  const catalog = getAgentCatalog(workspaceFolder);
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage("AgentSync: No agents found in catalog.");
+    return;
+  }
+  const items = [];
+  const sortedCategories = [...catalog.categories].sort();
+  for (const category of sortedCategories) {
+    const categoryAgents = catalog.agents.filter((a) => a.category === category);
+    if (categoryAgents.length === 0) continue;
+    items.push({
+      label: category.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    for (const agent2 of categoryAgents) {
+      items.push({
+        label: agent2.name,
+        description: agent2.category,
+        detail: agent2.description,
+        agentId: agent2.id
+      });
+    }
+  }
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: "Browse agent personalities (" + catalog.agents.length + " available)",
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  });
+  if (!selected || !selected.agentId) return;
+  const agent = catalog.agents.find((a) => a.id === selected.agentId);
+  if (!agent) return;
+  const doc = await vscode.workspace.openTextDocument({
+    content: "# " + agent.name + "\n\n**Category:** " + agent.category + "\n**Description:** " + agent.description + "\n**ID:** " + agent.id + "\n\n---\n\n" + agent.promptBody,
+    language: "markdown"
+  });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+async function runWithAgentCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
+  const catalog = getAgentCatalog(workspaceFolder);
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage("AgentSync: No agents found in catalog.");
+    return;
+  }
+  const items = catalog.agents.map((agent2) => ({
+    label: agent2.name,
+    description: agent2.category,
+    detail: agent2.description,
+    agentId: agent2.id
+  }));
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: "Select an agent personality",
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  });
+  if (!selected || !selected.agentId) return;
+  const agent = catalog.agents.find((a) => a.id === selected.agentId);
+  if (!agent) return;
+  const instruction = await vscode.window.showInputBox({
+    prompt: "Enter your instruction for " + agent.name,
+    placeHolder: "Example: Refactor the authentication module to use JWT tokens",
+    ignoreFocusOut: true
+  });
+  if (instruction === void 0 || !instruction.trim()) return;
+  const assembledPrompt = assembleAgentPrompt(agent, instruction.trim());
+  const result = await deliverPrompt("clipboard", { vscodeEnv: vscode.env }, assembledPrompt);
+  if (result.ok) {
+    vscode.window.showInformationMessage(
+      "AgentSync: Agent prompt copied to clipboard \u2014 paste into your AI tool. Agent: " + agent.name
+    );
+  } else {
+    vscode.window.showErrorMessage("AgentSync: Failed to copy prompt to clipboard.");
+  }
+}
+async function createPipelineCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("AgentSync: No workspace folder is open.");
+    return;
+  }
+  const catalog = getAgentCatalog(workspaceFolder);
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage("AgentSync: No agents found in catalog.");
+    return;
+  }
+  const goalInput = await vscode.window.showInputBox({
+    prompt: "Enter the pipeline goal / instruction",
+    placeHolder: "Example: Design, implement, and test a new REST endpoint",
+    ignoreFocusOut: true
+  });
+  if (goalInput === void 0 || !goalInput.trim()) return;
+  const goal = goalInput.trim();
+  const selectedAgents = [];
+  let pipelineBuilding = true;
+  while (pipelineBuilding) {
+    const agentItems = [
+      { label: "$(check) Done", description: "Finish building the pipeline", agentId: null },
+      ...catalog.agents.map((agent2) => ({
+        label: agent2.name,
+        description: agent2.category + (selectedAgents.length > 0 ? "" : " (first step)"),
+        detail: agent2.description,
+        agentId: agent2.id
+      }))
+    ];
+    const stepLabel = selectedAgents.length === 0 ? "Select the first agent in the pipeline" : "Select step " + (selectedAgents.length + 1) + " (or Done to finish). Current: " + selectedAgents.map((a) => a.name).join(" -> ");
+    const pick = await vscode.window.showQuickPick(agentItems, {
+      placeHolder: stepLabel,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true
+    });
+    if (!pick) return;
+    if (!pick.agentId) {
+      if (selectedAgents.length < 2) {
+        vscode.window.showWarningMessage("AgentSync: Pipeline needs at least 2 agents.");
+        continue;
+      }
+      pipelineBuilding = false;
+      continue;
+    }
+    const agent = catalog.agents.find((a) => a.id === pick.agentId);
+    if (agent) selectedAgents.push(agent);
+  }
+  const store = readHandoffs(workspaceFolder);
+  const allHandoffs = store.handoffs;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const chainId = "CHAIN-" + now.slice(0, 10).replace(/-/g, "") + "-" + Math.random().toString(36).slice(2, 8);
+  const state = readStateFile(workspaceFolder) || {};
+  const currentAgent = canonicalAgentId(
+    state?.activeSession?.agent || state?.lastSession?.agent || "user"
+  );
+  const chainHandoffs = selectedAgents.map((agent, index) => {
+    const dateStr = now.slice(0, 10).replace(/-/g, "");
+    const seq = String(allHandoffs.length + index + 1).padStart(3, "0");
+    const handoffId = "HO-" + dateStr + "-" + seq;
+    const isFirst = index === 0;
+    const isLast = index === selectedAgents.length - 1;
+    const nextAgent = isLast ? null : selectedAgents[index + 1];
+    return {
+      handoff_id: handoffId,
+      task_id: null,
+      from_agent: isFirst ? currentAgent : selectedAgents[index - 1].id,
+      to_agents: [agent.id],
+      owner_mode: "single",
+      status: isFirst ? "queued" : "blocked",
+      required_capabilities: mapAgentToCapabilities(agent),
+      summary: "Pipeline step " + (index + 1) + "/" + selectedAgents.length + ": " + goal,
+      notes: "Agent: " + agent.name + " (" + agent.category + ")",
+      no_handoff_reason: null,
+      files: [],
+      branch: runGit(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]) || PLACEHOLDER,
+      commit: runGit(workspaceFolder, ["rev-parse", "--short", "HEAD"]) || PLACEHOLDER,
+      prior_attempts: 0,
+      agent_personality_id: agent.id,
+      chain_id: chainId,
+      chain_step: index + 1,
+      chain_total: selectedAgents.length,
+      next_chain_agent_id: nextAgent ? nextAgent.id : null,
+      created_at: now,
+      updated_at: now,
+      state_history: [
+        {
+          status: isFirst ? "queued" : "blocked",
+          agent: currentAgent,
+          timestamp: now,
+          reason: "pipeline created"
+        }
+      ]
+    };
+  });
+  for (const handoff of chainHandoffs) {
+    const { valid, errors } = validateHandoff(handoff);
+    if (!valid) {
+      vscode.window.showErrorMessage(
+        "AgentSync: Invalid pipeline handoff: " + errors.join("; ")
+      );
+      return;
+    }
+  }
+  const updatedHandoffs = [...allHandoffs, ...chainHandoffs];
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: updatedHandoffs });
+  syncTrackerHandoffsSection(workspaceFolder);
+  vscode.window.showInformationMessage(
+    "AgentSync: Pipeline created with " + selectedAgents.length + " steps. Chain ID: " + chainId
+  );
+}
+function advanceChainOnCompletion(workspaceFolder, completedHandoffId) {
+  const store = readHandoffs(workspaceFolder);
+  const completed = store.handoffs.find(
+    (h) => toSingleLine(h?.handoff_id) === toSingleLine(completedHandoffId)
+  );
+  if (!completed || !completed.chain_id) return;
+  const completedStatus = String(completed.status || "").toLowerCase();
+  const isTerminal = completedStatus === "merged" || completedStatus === "approved" || completedStatus === "ready_for_review";
+  if (!isTerminal) return;
+  const nextStep = completed.chain_step + 1;
+  const nextHandoff = store.handoffs.find(
+    (h) => h.chain_id === completed.chain_id && h.chain_step === nextStep && String(h.status || "").toLowerCase() === "blocked"
+  );
+  if (!nextHandoff) return;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  nextHandoff.status = "queued";
+  nextHandoff.updated_at = now;
+  nextHandoff.notes = (nextHandoff.notes || "") + " | Previous step completed: " + toSingleLine(completed.summary || "");
+  if (!Array.isArray(nextHandoff.state_history)) nextHandoff.state_history = [];
+  nextHandoff.state_history.push({
+    status: "queued",
+    agent: "system",
+    timestamp: now,
+    reason: "chain auto-advance from " + completedHandoffId
+  });
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: store.handoffs });
+  syncTrackerHandoffsSection(workspaceFolder);
+}
 function activate(context) {
+  _extensionPath = context.extensionPath;
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   statusItem.command = "agentsync.openDashboard";
   updateStatusBar(statusItem);
+  try {
+    const wsFolder = getActiveWorkspaceFolder();
+    loadAgentCatalog(wsFolder);
+  } catch {
+  }
   const dashboardProvider = new AgentSyncDashboardViewProvider(context);
   const dashboardView = vscode.window.registerWebviewViewProvider(
     "agentsync.dashboard",
@@ -5360,6 +6300,18 @@ function activate(context) {
   const refreshCmd = vscode.commands.registerCommand("agentsync.refreshPanel", () => {
     scheduleRefresh();
   });
+  const browseAgentsCmd = vscode.commands.registerCommand(
+    "agentsync.browseAgents",
+    () => browseAgentsCommand()
+  );
+  const runWithAgentCmd = vscode.commands.registerCommand(
+    "agentsync.runWithAgent",
+    () => runWithAgentCommand()
+  );
+  const createPipelineCmd = vscode.commands.registerCommand(
+    "agentsync.createPipeline",
+    () => createPipelineCommand()
+  );
   setTimeout(() => checkSessionOnStartup(context), 3e3);
   startSessionReminderTimer(context);
   context.subscriptions.push(
@@ -5416,7 +6368,10 @@ function activate(context) {
     detectCmd,
     contextStatusCmd,
     setRoleCmd,
-    refreshCmd
+    refreshCmd,
+    browseAgentsCmd,
+    runWithAgentCmd,
+    createPipelineCmd
   );
 }
 function deactivate() {
