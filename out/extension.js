@@ -1099,6 +1099,15 @@ var _hotFilesCache = /* @__PURE__ */ new Map();
 var _snapshotService = null;
 var _agentCatalog = null;
 var _extensionPath = null;
+var EXECUTION_PROVIDER_DEFS = Object.freeze([
+  { id: "claude", label: "Claude" },
+  { id: "codex", label: "Codex" },
+  { id: "gemini", label: "Gemini" },
+  { id: "copilot", label: "Copilot" }
+]);
+var EXECUTION_PROVIDER_BY_ID = Object.freeze(
+  Object.fromEntries(EXECUTION_PROVIDER_DEFS.map((provider) => [provider.id, provider]))
+);
 function readAgentSyncConfig(workspaceFolder) {
   const settings = vscode.workspace.getConfiguration("agentsync", workspaceFolder?.uri);
   const settingsAutoStale = Number(settings.get("autoStaleSessionMinutes", 0));
@@ -1483,12 +1492,29 @@ function getStatePulseFrame(stateKey) {
 function isOpenHandoff(handoff) {
   return OPEN_HANDOFF_STATUSES.has(String(handoff?.status || "").toLowerCase());
 }
+function getHandoffOwners(handoff) {
+  const owners = Array.isArray(handoff?.to_agents) ? handoff.to_agents.map((agent) => canonicalAgentId(agent)).filter(Boolean) : [];
+  const personalityId = canonicalAgentId(
+    handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+  );
+  const isLegacyPipelineAssignment = Boolean(handoff?.chain_id) && Boolean(personalityId) && owners.length === 1 && owners[0] === personalityId;
+  if (isLegacyPipelineAssignment) return [];
+  return owners;
+}
+function isProviderFlexHandoff(handoff) {
+  return getHandoffOwners(handoff).length === 0;
+}
+function getHandoffPersonalityId(handoff) {
+  return canonicalAgentId(
+    handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+  );
+}
 function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
   const now = Date.now();
   const staleMs = staleAfterHours * 60 * 60 * 1e3;
   const isMine = (h) => {
-    const owners = Array.isArray(h?.to_agents) ? h.to_agents : [];
-    return owners.map((a) => canonicalAgentId(a)).includes(currentAgentId);
+    const owners = getHandoffOwners(h);
+    return owners.includes(currentAgentId);
   };
   const isStale = (h) => {
     const stamp = h?.updated_at || h?.created_at;
@@ -1504,21 +1530,26 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
   const sharedWithMe = open.filter(
     (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "shared"
   );
+  const runnable = open.filter((h) => {
+    if (String(h?.status || "").toLowerCase() !== "queued") return false;
+    return isProviderFlexHandoff(h) || !currentAgentId || isMine(h);
+  });
   const blockedOrStale = open.filter(
     (h) => String(h?.status || "").toLowerCase() === "blocked" || isStale(h)
   );
-  return { open, assignedToMe, sharedWithMe, blockedOrStale };
+  return { open, assignedToMe, sharedWithMe, blockedOrStale, runnable };
 }
 function runCheckCommand(workspaceFolder, command) {
   if (!command || !command.trim()) return Promise.resolve({ ok: false, output: "" });
   const argv = parseCommandArgv(command.trim());
   if (argv.length === 0) return Promise.resolve({ ok: false, output: "" });
   const [program, ...args] = argv;
+  const resolvedProgram = resolveHealthCheckProgram(program);
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const proc = cp.spawn(program, args, { cwd: workspaceFolder.uri.fsPath });
+    const proc = cp.spawn(resolvedProgram, args, { cwd: workspaceFolder.uri.fsPath });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -1554,6 +1585,13 @@ function runCheckCommand(workspaceFolder, command) {
       resolve({ ok: false, output: err.message });
     });
   });
+}
+function resolveHealthCheckProgram(program, platform = process.platform) {
+  const normalized = String(program || "").trim();
+  if (!normalized || platform !== "win32") return normalized;
+  if (/\.(cmd|exe|bat)$/i.test(normalized)) return normalized;
+  const shimCommands = /* @__PURE__ */ new Set(["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "corepack"]);
+  return shimCommands.has(normalized.toLowerCase()) ? `${normalized}.cmd` : normalized;
 }
 async function runHealthChecks(workspaceFolder) {
   const config = readAgentSyncConfig(workspaceFolder);
@@ -1667,6 +1705,17 @@ async function openAgentSyncTutorial(context) {
   }
   return false;
 }
+async function openAgentSyncDocs(context) {
+  const manifest = context?.extension?.packageJSON || {};
+  const target = String(manifest.homepage || manifest.repository?.url || "").trim();
+  if (!target) return false;
+  try {
+    await vscode.env.openExternal(vscode.Uri.parse(target));
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function ensureTrackerExists(context, workspaceFolder) {
   const trackerPath = getTrackerPath(workspaceFolder);
   if (fs.existsSync(trackerPath)) return true;
@@ -1757,23 +1806,57 @@ function getTrackerWarnings(workspaceFolder, tracker) {
   }
   return warnings;
 }
+function getExecutionProvider(value) {
+  const normalized = canonicalAgentId(value);
+  if (!normalized) return null;
+  return EXECUTION_PROVIDER_BY_ID[normalized] || null;
+}
+function getExecutionProviderId(value) {
+  if (isEmptyValue(String(value || ""))) return null;
+  return getExecutionProvider(value)?.id || canonicalAgentId(value) || null;
+}
+function getExecutionProviderLabel(value) {
+  if (isEmptyValue(String(value || ""))) return null;
+  const provider = getExecutionProvider(value);
+  if (provider) return provider.label;
+  const text = String(value || "").trim();
+  return text || null;
+}
+function getSessionProviderInfo(session, fallback = null) {
+  const providerId = canonicalAgentId(session?.provider_id || "") || getExecutionProviderId(session?.provider_label || "") || getExecutionProviderId(session?.agent || "") || getExecutionProviderId(fallback);
+  const providerLabel = getExecutionProviderLabel(session?.provider_label || "") || getExecutionProviderLabel(session?.agent || "") || getExecutionProviderLabel(fallback) || "Unknown";
+  return { id: providerId, label: providerLabel };
+}
+function getPersonalityDisplayName(workspaceFolder, personalityId) {
+  const normalized = canonicalAgentId(personalityId);
+  if (!normalized) return null;
+  try {
+    const catalog = getAgentCatalog(workspaceFolder);
+    const match = catalog?.agents?.find((agent) => canonicalAgentId(agent.id) === normalized);
+    return match?.name || null;
+  } catch {
+    return null;
+  }
+}
+function getSessionPersonalityInfo(workspaceFolder, session) {
+  const personalityId = canonicalAgentId(session?.personality_id || "") || canonicalAgentId(session?.agent_personality_id || "") || null;
+  const personalityName = String(session?.personality_name || "").trim() || getPersonalityDisplayName(workspaceFolder, personalityId) || "None";
+  return { id: personalityId, name: personalityName };
+}
 async function promptForAgent(defaultAgent) {
-  const preset = ["Claude", "Codex", "Copilot"];
-  const defaultLabel = !isEmptyValue(defaultAgent) ? defaultAgent : "Codex";
+  const defaultLabel = getExecutionProviderLabel(defaultAgent) || "Codex";
+  const builtIn = EXECUTION_PROVIDER_DEFS.map((provider) => ({
+    label: provider.label,
+    description: provider.label === defaultLabel ? "default" : void 0
+  }));
   const choice = await vscode.window.showQuickPick(
-    [
-      ...preset.map((name) => ({
-        label: name,
-        description: name === defaultLabel ? "default" : void 0
-      })),
-      { label: "Other" }
-    ],
-    { placeHolder: "Select the agent for this session" }
+    [...builtIn, { label: "Other" }],
+    { placeHolder: "Select the execution provider for this session" }
   );
   if (!choice) return null;
   if (choice.label !== "Other") return choice.label;
   const custom = await vscode.window.showInputBox({
-    prompt: "Enter agent name",
+    prompt: "Enter provider name",
     value: defaultLabel !== "Codex" ? defaultLabel : ""
   });
   if (custom === void 0) return null;
@@ -1984,8 +2067,8 @@ function findClaimableHandoff(workspaceFolder, agentId) {
   const { handoffs } = readHandoffs(workspaceFolder);
   return handoffs.find((h) => {
     if (String(h?.status || "").toLowerCase() !== "queued") return false;
-    const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : [];
-    return owners.includes(canonical);
+    const owners = getHandoffOwners(h);
+    return owners.length === 0 || owners.includes(canonical);
   }) || null;
 }
 function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
@@ -1999,7 +2082,7 @@ function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
   const updated = store.handoffs.map((h) => {
     if (toSingleLine(h?.handoff_id) !== normalizedId) return h;
     const currentStatus = String(h?.status || "").toLowerCase();
-    const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : [];
+    const owners = getHandoffOwners(h);
     const lastClaim = Array.isArray(h?.state_history) && h.state_history.length > 0 ? h.state_history[h.state_history.length - 1] : null;
     const claimedBy = lastClaim?.agent ? canonicalAgentId(lastClaim.agent) : null;
     if (currentStatus === "in_progress") {
@@ -2369,12 +2452,42 @@ function syncAgencyRunsCore(workspaceFolder) {
   writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: now });
   return { synced: candidates.length, created, updated: updatedCount, errors };
 }
-function startSessionCore(workspaceFolder, agent, goal) {
+function buildSessionIdentity(workspaceFolder, providerLabel, options = {}) {
+  const providerId = getExecutionProviderId(options.providerId || providerLabel);
+  const providerDisplay = getExecutionProviderLabel(options.providerLabel || providerLabel) || "Unknown";
+  const personalityId = canonicalAgentId(options.personalityId || "");
+  const personalityName = String(options.personalityName || "").trim() || getPersonalityDisplayName(workspaceFolder, personalityId) || null;
+  return {
+    provider_id: providerId,
+    provider_label: providerDisplay,
+    personality_id: personalityId,
+    personality_name: personalityName,
+    // Legacy field retained for backward-compatible readers.
+    agent: providerDisplay
+  };
+}
+function updateActiveSessionContext(workspaceFolder, updates = {}) {
+  const state = readStateFile(workspaceFolder) || {};
+  if (!state?.sessionActive || !state?.activeSession) return null;
+  const nextSession = {
+    ...state.activeSession,
+    ...updates
+  };
+  writeStateFile(workspaceFolder, {
+    ...state,
+    lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+    activeSession: nextSession
+  });
+  return nextSession;
+}
+function startSessionCore(workspaceFolder, agent, goal, options = {}) {
   const content = readTracker(workspaceFolder);
   if (!content) throw new Error("Could not read AgentTracker.md");
   const existingTracker = parseTracker(content);
   const normalizedGoal = (goal || "").trim() || "Session started";
-  const entry = `- [ ] ${agent} (${(/* @__PURE__ */ new Date()).toISOString()}): ${normalizedGoal}`;
+  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const sessionIdentity = buildSessionIdentity(workspaceFolder, agent, options);
+  const entry = `- [ ] ${sessionIdentity.provider_label} (${startedAt}): ${normalizedGoal}`;
   const currentBody = getSectionBody(content, "In Progress");
   const currentLines = currentBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line && line.toLowerCase() !== "*nothing active*");
   const updatedBody = [...currentLines, entry].join("\n");
@@ -2393,23 +2506,23 @@ function startSessionCore(workspaceFolder, agent, goal) {
   const updatedInProgressLines = [...currentLines, entry];
   writeStateFile(workspaceFolder, {
     sessionActive: true,
-    lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+    lastUpdated: startedAt,
     activeSession: {
-      agent,
+      ...sessionIdentity,
       goal: normalizedGoal,
-      startedAt: (/* @__PURE__ */ new Date()).toISOString()
+      startedAt
     },
     sessionMetrics: {
       filesOpened: 0,
       filesModified: 0,
       commandsRun: 0,
-      startedAt: (/* @__PURE__ */ new Date()).toISOString()
+      startedAt
     },
     lastSession,
     hotFiles: [],
     inProgress: updatedInProgressLines
   });
-  return { agent, goal: normalizedGoal };
+  return { agent: sessionIdentity.provider_label, goal: normalizedGoal };
 }
 async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData = null, options = {}) {
   let content = readTracker(workspaceFolder);
@@ -2650,8 +2763,14 @@ async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoff
   const openHandoffs2 = currentHandoffs.handoffs.filter(isOpenHandoff);
   const shouldWriteAutomationState = automationFeatureEnabled && (automationUsed || summarySource === "deterministic" || generatedPromptLines.length > 0);
   const existingMetrics = readStateFile(workspaceFolder)?.sessionMetrics || {};
-  const stateLastSession = {
+  const existingState = readStateFile(workspaceFolder) || {};
+  const activeSessionIdentity = buildSessionIdentity(
+    workspaceFolder,
     agent,
+    existingState?.activeSession || {}
+  );
+  const stateLastSession = {
+    ...activeSessionIdentity,
     date: now,
     summary: persistedSummary,
     branch,
@@ -2947,11 +3066,13 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
   const config = snapshot.config;
   const handoffInfo = snapshot.handoffInfo;
   const inProgressLines = snapshot.inProgressLines;
-  const currentAgentId = canonicalAgentId(
-    state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
+  const currentProvider = getSessionProviderInfo(
+    state?.activeSession || state?.lastSession || null,
+    tracker.agent
   );
+  const activePersonality = getSessionPersonalityInfo(workspaceFolder, state?.activeSession || null);
   const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS;
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentAgentId, staleAfterHours);
+  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProvider.id, staleAfterHours);
   const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
   const opsState = getOperationalState(
     state,
@@ -2972,15 +3093,30 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
       }
     }
   }
+  const health = state?.health || {};
+  const healthLabels = ["Build", "Tests", "Deploy"];
+  const missingHealthChecks = healthLabels.filter((label) => {
+    const status = String(health?.[label]?.status ?? health?.[label] ?? "Not configured");
+    return status === "Not configured";
+  });
+  if (missingHealthChecks.length > 0) {
+    warnings.push(
+      `Setup needed: ${missingHealthChecks.join(", ")} checks are not configured.`
+    );
+  }
   const hotFiles = new Set(getHotFilesCached(workspaceFolder).map(normalizeRepoRelativePath));
   const getSuggestedNextStep = () => {
     if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.';
     if (state?.sessionActive)
       return 'Use "End Session" when you are done, or "Clear Active Session" if stale.';
+    if (handoffBuckets.runnable.length > 0)
+      return 'Use "Run Next Step" to claim the next runnable handoff and prepare its prompt.';
     if (inProgressLines.length > 0)
       return "Review in-progress items, then start a new session to continue.";
     if (handoffBuckets.open.length > 0)
-      return "Open Handoffs JSON and pick the highest-priority open handoff.";
+      return "Review blocked or provider-specific handoffs, then unblock or complete the earlier step.";
+    if (missingHealthChecks.length > 0)
+      return "Configure build/test/deploy commands to unlock health reporting on End Session.";
     return 'Ready to start. Use "Start Session" before making changes.';
   };
   const onboarding = {
@@ -2992,25 +3128,27 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
     const value = entry?.status ?? entry ?? "Not configured";
     return String(value || "Not configured");
   };
-  const health = state?.health || {};
   const summarizeHandoff = (h) => ({
     id: String(h?.handoff_id || h?.task_id || "unknown"),
     summary: String(h?.summary || h?.task_id || "No summary"),
     status: String(h?.status || "queued"),
     mode: String(h?.owner_mode || "unknown"),
-    owners: Array.isArray(h?.to_agents) ? h.to_agents : []
+    owners: getHandoffOwners(h)
   });
   const summarizeHandoffCard = (h, stale = false) => {
     const files = Array.isArray(h?.files) ? h.files : [];
-    const toAgents = Array.isArray(h?.to_agents) ? h.to_agents : [];
+    const toAgents = getHandoffOwners(h);
+    const personalityId = getHandoffPersonalityId(h);
+    const personalityName = getPersonalityDisplayName(workspaceFolder, personalityId);
     return {
       id: String(h?.handoff_id || h?.task_id || "unknown"),
       summary: String(h?.summary || "No summary"),
       from_agent: String(h?.from_agent || "unknown"),
-      to_agents_display: toAgents.join(", ") || "any",
+      to_agents_display: toAgents.join(", ") || "provider-flex",
       files_display: files.length > 3 ? files.slice(0, 3).join(", ") + " (+" + (files.length - 3) + " more)" : files.join(", ") || "none",
       status: String(h?.status || "queued"),
       notes: String(h?.notes || ""),
+      personality: personalityName || personalityId || "Auto",
       recommended_model_tier: h?.recommended_model_tier || null,
       model_justification: String(h?.model_justification || ""),
       stale_observation: stale
@@ -3032,11 +3170,13 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
   const normalizedViewMode = viewMode === "full" ? "full" : "compact";
   const defaultShortcuts = [
     "agentsync.startSession",
+    "agentsync.runNextStep",
     "agentsync.endSession",
     "agentsync.openTracker",
     "agentsync.contextStatus"
   ];
-  const shortcuts = Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0 ? config.dashboardShortcuts : defaultShortcuts;
+  const shortcutsBase = Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0 ? config.dashboardShortcuts : defaultShortcuts;
+  const shortcuts = shortcutsBase.includes("agentsync.runNextStep") ? shortcutsBase : [shortcutsBase[0] || "agentsync.startSession", "agentsync.runNextStep", ...shortcutsBase.slice(1)];
   return {
     hasWorkspace: true,
     workspace: workspaceFolder.name,
@@ -3055,12 +3195,13 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
     onboarding,
     session: {
       active: Boolean(state?.sessionActive),
-      agent: state?.activeSession?.agent || "None",
+      provider: state?.sessionActive ? currentProvider.label : "None",
+      personality: state?.sessionActive ? activePersonality.name : "None",
       goal: state?.activeSession?.goal || "No active goal",
       startedAt: state?.activeSession?.startedAt || null
     },
     tracker: {
-      lastAgent: state?.lastSession?.agent || tracker.agent,
+      lastAgent: state?.lastSession?.provider_label || state?.lastSession?.agent || tracker.agent,
       lastDate: state?.lastSession?.date || tracker.date,
       lastSummary: state?.lastSession?.summary || tracker.summary,
       branch: state?.lastSession?.branch || tracker.branch,
@@ -3085,7 +3226,7 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
       assignedToMe: handoffBuckets.assignedToMe.slice(0, 8).map(summarizeHandoff),
       sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 8).map(summarizeHandoff),
       blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff),
-      queued: handoffBuckets.assignedToMe.filter((h) => String(h?.status || "").toLowerCase() === "queued").slice(0, 10).map((h) => {
+      queued: handoffBuckets.runnable.slice(0, 10).map((h) => {
         const isStale = (h.files || []).some(
           (file) => hotFiles.has(normalizeRepoRelativePath(file))
         );
@@ -3120,7 +3261,7 @@ function getDashboardModel(workspaceFolder, viewMode = "compact") {
           total: steps[0]?.chain_total || steps.length,
           steps: steps.map((s) => ({
             step: s.chain_step || 0,
-            agentId: s.agent_personality_id || s.to_agents?.[0] || "unknown",
+            agentName: getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(s)) || getHandoffPersonalityId(s) || "Auto",
             status: String(s.status || "blocked"),
             handoffId: String(s.handoff_id || ""),
             summary: String(s.summary || "")
@@ -3143,10 +3284,11 @@ function generateContextCapsule(workspaceFolder) {
   const handoffInfo = snapshot.handoffInfo || { handoffs: [] };
   const config = snapshot.config || {};
   const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS;
-  const currentAgentId = canonicalAgentId(
-    state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
-  );
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentAgentId, staleAfterHours);
+  const currentProviderId = getSessionProviderInfo(
+    state?.activeSession || state?.lastSession || null,
+    tracker.agent
+  ).id;
+  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProviderId, staleAfterHours);
   const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
   const opsState = getOperationalState(
     state,
@@ -3450,6 +3592,7 @@ function getDashboardHtml() {
     }
     .status-pass { border-color: #29ca72; color: #8df2b7; }
     .status-fail { border-color: #ff6c74; color: #ffb2b6; }
+    .status-setup { border-color: #ffcf5a; color: #ffe08a; }
     .status-unknown { border-color: #888; color: #c9c9c9; }
     .action-center {
       margin-bottom: 10px;
@@ -3537,7 +3680,8 @@ function getDashboardHtml() {
         <button class="action compact-action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
         <button class="action compact-action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
         <button class="action compact-action" data-command="agentsync.contextStatus">Context Status</button>
-        <button class="action compact-action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
+        <button class="action compact-action" data-command="agentsync.openTutorial">Open Walkthrough</button>
+        <button class="action compact-action" data-command="agentsync.openDocs">Open Web Docs</button>
         <button class="action compact-action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
     </section>
@@ -3553,7 +3697,7 @@ function getDashboardHtml() {
         <button class="action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
         <button class="action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
         <button class="action" data-command="agentsync.contextStatus">Context Status</button>
-        <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
+        <button class="action" data-command="agentsync.openTutorial">Open Walkthrough</button>
         <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
 
@@ -3590,7 +3734,8 @@ function getDashboardHtml() {
           <h3>Session</h3>
           <dl class="kv">
             <dt>Active</dt><dd id="sessionActive">No</dd>
-            <dt>Agent</dt><dd id="sessionAgent">None</dd>
+            <dt>Provider</dt><dd id="sessionProvider">None</dd>
+            <dt>Personality</dt><dd id="sessionPersonality">None</dd>
             <dt>Goal</dt><dd id="sessionGoal">No active goal</dd>
             <dt>Started</dt><dd id="sessionStarted">-</dd>
           </dl>
@@ -3612,7 +3757,7 @@ function getDashboardHtml() {
         </section>
 
         <section class="card" id="queuedHandoffsSection">
-          <h3>Queued Handoffs</h3>
+          <h3>Runnable Now</h3>
           <div id="queuedHandoffsList"></div>
         </section>
 
@@ -3627,7 +3772,7 @@ function getDashboardHtml() {
         </section>
 
         <section class="card">
-          <h3>Agent Catalog</h3>
+          <h3>Personality Catalog</h3>
           <div id="agentCatalogSection"></div>
         </section>
 
@@ -3655,27 +3800,35 @@ function getDashboardHtml() {
     const commandLabels = {
       'agentsync.init': 'Initialize Workspace',
       'agentsync.startSession': 'Start Session',
+      'agentsync.runNextStep': 'Run Next Step',
       'agentsync.endSession': 'End Session',
       'agentsync.clearActiveSession': 'Clear Active Session',
       'agentsync.openTracker': 'Open AgentTracker',
+      'agentsync.openConfig': 'Open .agentsync.json',
       'agentsync.openHandoffs': 'Open Handoffs JSON',
       'agentsync.contextCapsule': 'Generate Context Capsule',
       'agentsync.syncAgencyRuns': 'Sync Agency Runs',
+      'agentsync.detectCommands': 'Detect Commands',
       'agentsync.contextStatus': 'Context Status',
-      'agentsync.openTutorial': 'Open Interactive Tutorial',
+      'agentsync.openTutorial': 'Open Walkthrough',
+      'agentsync.openDocs': 'Open Web Docs',
       'agentsync.refreshPanel': 'Refresh'
     };
     const commandColors = {
       'agentsync.init': '#4fb3ff',
       'agentsync.startSession': '#1fd678',
+      'agentsync.runNextStep': '#7fd8ff',
       'agentsync.endSession': '#ffb347',
       'agentsync.clearActiveSession': '#ff6c74',
       'agentsync.openTracker': '#8ab4ff',
+      'agentsync.openConfig': '#8ab4ff',
       'agentsync.openHandoffs': '#8ab4ff',
       'agentsync.contextCapsule': '#7fd8ff',
       'agentsync.syncAgencyRuns': '#7ccf8a',
+      'agentsync.detectCommands': '#ffcf5a',
       'agentsync.contextStatus': '#c59cff',
       'agentsync.openTutorial': '#8ab4ff',
+      'agentsync.openDocs': '#8ab4ff',
       'agentsync.refreshPanel': '#3dd6d0'
     };
 
@@ -3845,6 +3998,7 @@ function getDashboardHtml() {
       const normalized = String(status || '').toLowerCase();
       if (normalized === 'pass') return 'status-pass';
       if (normalized === 'fail') return 'status-fail';
+      if (normalized === 'not configured') return 'status-setup';
       return 'status-unknown';
     }
 
@@ -3857,15 +4011,43 @@ function getDashboardHtml() {
       const el = byId('healthList');
       if (!el) return;
       el.innerHTML = '';
+      var needsSetup = false;
       rows.forEach((row) => {
         const li = document.createElement('li');
         const pill = document.createElement('span');
         pill.className = 'status-pill ' + healthClass(row.status);
-        pill.textContent = row.status;
+        const normalized = String(row.status || '');
+        if (normalized === 'Not configured') needsSetup = true;
+        pill.textContent = normalized === 'Not configured' ? 'Setup needed' : row.status;
         li.textContent = row.name + ': ';
         li.appendChild(pill);
         el.appendChild(li);
       });
+      if (needsSetup) {
+        const hint = document.createElement('li');
+        hint.textContent = 'Configure build/test/deploy commands to unlock end-session health checks.';
+        el.appendChild(hint);
+
+        const actions = document.createElement('li');
+        actions.style.listStyle = 'none';
+        actions.style.marginLeft = '-16px';
+        actions.style.marginTop = '6px';
+
+        var detectBtn = document.createElement('button');
+        detectBtn.className = 'action compact-action';
+        detectBtn.textContent = 'Detect Commands';
+        detectBtn.setAttribute('data-command', 'agentsync.detectCommands');
+        actions.appendChild(detectBtn);
+
+        var openBtn = document.createElement('button');
+        openBtn.className = 'action compact-action';
+        openBtn.style.marginLeft = '6px';
+        openBtn.textContent = 'Open .agentsync.json';
+        openBtn.setAttribute('data-command', 'agentsync.openConfig');
+        actions.appendChild(openBtn);
+
+        el.appendChild(actions);
+      }
     }
 
     function formatHandoff(item) {
@@ -3880,7 +4062,7 @@ function getDashboardHtml() {
         const empty = document.createElement('p');
         empty.className = 'empty';
         empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
-        empty.textContent = 'No queued handoffs assigned to you.';
+        empty.textContent = 'No runnable queued handoffs for this provider.';
         container.appendChild(empty);
         return;
       }
@@ -3895,8 +4077,13 @@ function getDashboardHtml() {
 
         const metaEl = document.createElement('div');
         metaEl.className = 'handoff-card-meta';
-        metaEl.textContent = 'From: ' + item.from_agent + ' | To: ' + item.to_agents_display + ' | Files: ' + item.files_display;
+        metaEl.textContent = 'From: ' + item.from_agent + ' | Provider: ' + item.to_agents_display + ' | Files: ' + item.files_display;
         card.appendChild(metaEl);
+
+        const personalityEl = document.createElement('div');
+        personalityEl.className = 'handoff-card-meta';
+        personalityEl.textContent = 'Personality: ' + item.personality;
+        card.appendChild(personalityEl);
 
         if (item.recommended_model_tier) {
           const tierEl = document.createElement('span');
@@ -3986,7 +4173,10 @@ function getDashboardHtml() {
 
     function getRunningHint(command, label) {
       if (command === 'agentsync.startSession') {
-        return 'You may see prompts for agent name and goal. Fill those in, then wait for completion.';
+        return 'You may see prompts for provider and goal. Fill those in, then wait for completion.';
+      }
+      if (command === 'agentsync.runNextStep') {
+        return 'AgentSync is claiming the next step, activating the suggested personality, and copying the prompt.';
       }
       if (command === 'agentsync.endSession') {
         return 'You may see prompts for summary and next work. Complete them, then wait for confirmation.';
@@ -4022,7 +4212,7 @@ function getDashboardHtml() {
 
       const header = document.createElement('div');
       header.style.cssText = 'margin-bottom:6px;font-size:12px;color:var(--muted);';
-      header.textContent = catalog.totalAgents + ' agent personalities available';
+      header.textContent = catalog.totalAgents + ' LLM-agnostic personalities available';
       el.appendChild(header);
 
       const badgeContainer = document.createElement('div');
@@ -4042,13 +4232,13 @@ function getDashboardHtml() {
 
       var browseBtn = document.createElement('button');
       browseBtn.className = 'action compact-action';
-      browseBtn.textContent = 'Browse Agents';
+      browseBtn.textContent = 'Browse Personalities';
       browseBtn.setAttribute('data-command', 'agentsync.browseAgents');
       actions.appendChild(browseBtn);
 
       var runBtn = document.createElement('button');
       runBtn.className = 'action compact-action';
-      runBtn.textContent = 'Run with Agent';
+      runBtn.textContent = 'Run with Personality';
       runBtn.setAttribute('data-command', 'agentsync.runWithAgent');
       actions.appendChild(runBtn);
 
@@ -4098,7 +4288,7 @@ function getDashboardHtml() {
           var bg = statusColors[step.status] || '#666';
           stepEl.style.cssText = 'display:inline-flex;align-items:center;padding:3px 8px;border-radius:6px;font-size:11px;' +
             'background:' + bg + '22;color:' + bg + ';border:1px solid ' + bg + '44;cursor:default;';
-          stepEl.textContent = step.step + '. ' + (step.agentId || '').split('/').pop();
+          stepEl.textContent = step.step + '. ' + (step.agentName || '').split('/').pop();
           stepEl.title = step.summary + ' (' + step.status + ')';
           stepsContainer.appendChild(stepEl);
 
@@ -4151,7 +4341,8 @@ function getDashboardHtml() {
       renderCompactSummary(model.compact || {});
 
       setText('sessionActive', model.session.active ? 'Yes' : 'No');
-      setText('sessionAgent', model.session.agent);
+      setText('sessionProvider', model.session.provider);
+      setText('sessionPersonality', model.session.personality);
       setText('sessionGoal', model.session.goal);
       setText('sessionStarted', model.session.startedAt ? new Date(model.session.startedAt).toLocaleString() : '-');
       renderOnboarding(model.onboarding || {});
@@ -4405,9 +4596,11 @@ async function handleHandoffAction(workspaceFolder, action, handoffId, context) 
   const normalizedId = toSingleLine(handoffId);
   if (!normalizedId) return;
   const state = readStateFile(workspaceFolder) || {};
-  const currentAgent = state?.activeSession?.agent || state?.lastSession?.agent || "";
+  const activeProvider = getSessionProviderInfo(state?.activeSession || null);
+  const lastProvider = getSessionProviderInfo(state?.lastSession || null);
+  const currentProvider = activeProvider.label !== "Unknown" ? activeProvider.label : lastProvider.label;
   if (action === "claim") {
-    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent);
+    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentProvider);
     if (result.ok) {
       syncTrackerHandoffsSection(workspaceFolder);
       vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`);
@@ -4419,10 +4612,15 @@ async function handleHandoffAction(workspaceFolder, action, handoffId, context) 
   } else if (action === "start") {
     const { handoffs } = readHandoffs(workspaceFolder);
     const handoff = handoffs.find((h) => toSingleLine(h?.handoff_id) === normalizedId);
-    const goalPreFill = handoff ? toSingleLine(handoff.summary) : "";
-    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent);
-    if (result.ok) syncTrackerHandoffsSection(workspaceFolder);
-    await startSession(context, { goalPreFill, agentPreFill: currentAgent });
+    if (!handoff) return;
+    let providerLabel = currentProvider;
+    if (!state?.sessionActive) {
+      providerLabel = await promptForAgent(currentProvider || "Codex");
+      if (!providerLabel) return;
+    }
+    await runHandoffStep(workspaceFolder, handoff, providerLabel, {
+      ensureSession: !state?.sessionActive
+    });
   } else if (action === "skip") {
     const store = readHandoffs(workspaceFolder);
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -4436,7 +4634,7 @@ async function handleHandoffAction(workspaceFolder, action, handoffId, context) 
           ...Array.isArray(h.state_history) ? h.state_history : [],
           {
             status: "blocked",
-            agent: canonicalAgentId(currentAgent),
+            agent: canonicalAgentId(currentProvider),
             timestamp: now,
             reason: "skipped via dashboard"
           }
@@ -4510,9 +4708,7 @@ var AgentSyncTreeDataProvider = class {
       handoffInfo.handoffs,
       autoStaleSessionMinutes
     );
-    const currentAgentId = canonicalAgentId(
-      state?.activeSession?.agent || state?.lastSession?.agent
-    );
+    const currentAgentId = getSessionProviderInfo(state?.activeSession || state?.lastSession || null).id;
     return [
       this._buildOverviewSection(
         workspaceFolder,
@@ -4564,7 +4760,7 @@ var AgentSyncTreeDataProvider = class {
         tooltip: opsState.reason
       }),
       new AgentSyncItem(
-        `Active session: ${state?.sessionActive ? state?.activeSession?.agent || "Unknown" : "None"}`,
+        `Active provider: ${state?.sessionActive ? getSessionProviderInfo(state?.activeSession || null).label || "Unknown" : "None"}`,
         vscode.TreeItemCollapsibleState.None,
         { icon: "account" }
       ),
@@ -4609,6 +4805,12 @@ var AgentSyncTreeDataProvider = class {
         ),
         action("Start Session", "agentsync.startSession", "play", "Begin tracking active work"),
         action(
+          "Run Next Step",
+          "agentsync.runNextStep",
+          "run",
+          "Claim the next runnable handoff and prepare its prompt"
+        ),
+        action(
           "End Session",
           "agentsync.endSession",
           "debug-stop",
@@ -4639,17 +4841,23 @@ var AgentSyncTreeDataProvider = class {
           "Show session metrics and context health"
         ),
         action(
-          "Open Interactive Tutorial",
+          "Open Walkthrough",
           "agentsync.openTutorial",
           "mortar-board",
-          "Open guided onboarding in Getting Started"
+          "Open guided onboarding in VS Code Getting Started"
+        ),
+        action(
+          "Open Web Docs",
+          "agentsync.openDocs",
+          "link-external",
+          "Open AgentSync documentation in your browser"
         )
       ]
     });
   }
   _buildSessionSection(state, staleInfo = { isStale: false, ageMs: null }) {
     if (!state || !state.sessionActive || !state.activeSession) {
-      const lastAgent = state?.lastSession?.agent;
+      const lastAgent = state?.lastSession?.provider_label || state?.lastSession?.agent;
       const lastDate = state?.lastSession?.date;
       const tooltip = lastDate ? `Last session: ${lastAgent} on ${new Date(lastDate).toLocaleString()}` : "No sessions recorded yet";
       return new AgentSyncItem("No active session", vscode.TreeItemCollapsibleState.None, {
@@ -4659,7 +4867,12 @@ var AgentSyncTreeDataProvider = class {
         command: { command: "agentsync.startSession", title: "Start Session" }
       });
     }
-    const { agent, goal, startedAt } = state.activeSession;
+    const sessionProvider = getSessionProviderInfo(state.activeSession || null);
+    const sessionPersonality = getSessionPersonalityInfo(
+      getActiveWorkspaceFolder(),
+      state.activeSession || null
+    );
+    const { goal, startedAt } = state.activeSession;
     const elapsed = formatElapsed(Date.now() - Date.parse(startedAt));
     const staleChild = staleInfo?.isStale ? new AgentSyncItem(
       `Stale session: running ${formatElapsed(staleInfo.ageMs || 0)}`,
@@ -4683,12 +4896,21 @@ var AgentSyncTreeDataProvider = class {
         tooltip: `Started at ${new Date(startedAt).toLocaleTimeString()}`
       }
     );
-    return new AgentSyncItem(agent, vscode.TreeItemCollapsibleState.Expanded, {
+    return new AgentSyncItem(sessionProvider.label, vscode.TreeItemCollapsibleState.Expanded, {
       icon: staleInfo?.isStale ? "warning" : "record",
       iconColor: staleInfo?.isStale ? new vscode.ThemeColor("charts.yellow") : new vscode.ThemeColor("testing.iconPassed"),
       description: staleInfo?.isStale ? `stale ${elapsed}` : elapsed,
       contextValue: "activeSession",
-      children: [goalChild, elapsedChild, ...staleChild ? [staleChild] : []]
+      children: [
+        new AgentSyncItem(
+          `Personality: ${sessionPersonality.name || "None"}`,
+          vscode.TreeItemCollapsibleState.None,
+          { icon: "library", tooltip: "Active work personality" }
+        ),
+        goalChild,
+        elapsedChild,
+        ...staleChild ? [staleChild] : []
+      ]
     });
   }
   _buildHandoffsSection(workspaceFolder, handoffInfo, currentAgentId, staleAfterHours) {
@@ -4731,13 +4953,16 @@ var AgentSyncTreeDataProvider = class {
       const id = h?.handoff_id || h?.task_id || "unknown";
       const summary = (h?.summary || h?.task_id || "No summary").trim();
       const status = String(h?.status || "queued");
-      const owners = Array.isArray(h?.to_agents) ? h.to_agents.join(",") : "";
+      const owners = getHandoffOwners(h).join(",");
+      const personality = getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(h));
       return new AgentSyncItem(`${id}: ${summary}`, vscode.TreeItemCollapsibleState.None, {
         icon: "note",
         description: status,
-        tooltip: [`owners: ${owners || "(none)"}`, `mode: ${h?.owner_mode || "unknown"}`].join(
-          "\n"
-        ),
+        tooltip: [
+          `owners: ${owners || "provider-flex"}`,
+          `personality: ${personality || getHandoffPersonalityId(h) || "auto"}`,
+          `mode: ${h?.owner_mode || "unknown"}`
+        ].join("\n"),
         command: { command: "agentsync.openHandoffs", title: "Open Handoffs JSON" }
       });
     };
@@ -4783,17 +5008,22 @@ var AgentSyncTreeDataProvider = class {
       const { icon, color } = statusIcon(status);
       const output = (entry?.output || "").trim();
       return new AgentSyncItem(label, vscode.TreeItemCollapsibleState.None, {
-        icon,
-        iconColor: color,
-        description: status,
-        tooltip: output ? `Last output:
-${output.slice(-300)}` : void 0
+        icon: status === "Not configured" ? "warning" : icon,
+        iconColor: status === "Not configured" ? new vscode.ThemeColor("charts.yellow") : color,
+        description: status === "Not configured" ? "Setup needed" : status,
+        tooltip: status === "Not configured" ? "Configure this command in .agentsync.json or run Detect Build/Test Commands." : output ? `Last output:
+${output.slice(-300)}` : void 0,
+        command: status === "Not configured" ? { command: "agentsync.detectCommands", title: "Detect Build/Test Commands" } : void 0
       });
     });
     const hasFail = Object.values(health).some((e) => (e?.status ?? e) === "Fail");
+    const hasSetupMissing = ["Build", "Tests", "Deploy"].some((label) => {
+      const entry = health[label];
+      return (entry?.status ?? entry ?? "Not configured") === "Not configured";
+    });
     return new AgentSyncItem("Health", vscode.TreeItemCollapsibleState.Collapsed, {
-      icon: hasFail ? "error" : "heart",
-      iconColor: hasFail ? new vscode.ThemeColor("testing.iconFailed") : void 0,
+      icon: hasFail ? "error" : hasSetupMissing ? "warning" : "heart",
+      iconColor: hasFail ? new vscode.ThemeColor("testing.iconFailed") : hasSetupMissing ? new vscode.ThemeColor("charts.yellow") : void 0,
       children
     });
   }
@@ -4882,7 +5112,14 @@ Run "AgentSync: Initialize Workspace".`;
     const tooltipLines = [];
     tooltipLines.push(`State: ${opsState.label}`);
     tooltipLines.push(opsState.reason);
-    const displayAgent = state?.lastSession?.agent || tracker.agent;
+    if (state?.sessionActive && state?.activeSession) {
+      const activeProvider = getSessionProviderInfo(state.activeSession || null);
+      const activePersonality = getSessionPersonalityInfo(workspaceFolder, state.activeSession || null);
+      tooltipLines.push(
+        `Active: ${activeProvider.label}${activePersonality.name && activePersonality.name !== "None" ? " | " + activePersonality.name : ""}`
+      );
+    }
+    const displayAgent = state?.lastSession?.provider_label || state?.lastSession?.agent || tracker.agent;
     const displayDate = state?.lastSession?.date || tracker.date;
     const displayBranch = state?.lastSession?.branch || tracker.branch;
     const displayCommit = state?.lastSession?.commit || tracker.commit;
@@ -4974,7 +5211,8 @@ async function initWorkspace(context, selectedFolder = null) {
   const choice = await vscode.window.showInformationMessage(
     `AgentSync: Workspace "${workspaceFolder.name}" initialized. ${summary}`,
     "Open AgentSync Panel",
-    "Open Interactive Tutorial"
+    "Open Walkthrough",
+    "Open Web Docs"
   );
   const cfg = readAgentSyncConfig(workspaceFolder);
   if (!cfg.userProfile || !cfg.userProfile.role) {
@@ -4988,12 +5226,17 @@ async function initWorkspace(context, selectedFolder = null) {
         'AgentSync: Could not focus the panel. Run "View: Reset View Locations" and try again.'
       );
     }
-  } else if (choice === "Open Interactive Tutorial") {
+  } else if (choice === "Open Walkthrough") {
     const opened = await openAgentSyncTutorial(context);
     if (!opened) {
       vscode.window.showWarningMessage(
-        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
+        'AgentSync: Could not open the walkthrough. Open "Getting Started" and select AgentSync.'
       );
+    }
+  } else if (choice === "Open Web Docs") {
+    const opened = await openAgentSyncDocs(context);
+    if (!opened) {
+      vscode.window.showWarningMessage("AgentSync: Could not open the documentation URL.");
     }
   }
   const trackerPath = getTrackerPath(workspaceFolder);
@@ -5020,6 +5263,19 @@ async function openHandoffs() {
   ensureHandoffsFile(workspaceFolder);
   const handoffsPath = getHandoffsPath(workspaceFolder);
   const doc = await vscode.workspace.openTextDocument(handoffsPath);
+  await vscode.window.showTextDocument(doc);
+}
+async function openConfigFile() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("AgentSync: No workspace folder is open.");
+    return;
+  }
+  const configPath = getConfigPath(workspaceFolder);
+  if (!fs.existsSync(configPath)) {
+    writeConfigFile(workspaceFolder, readAgentSyncConfig(workspaceFolder));
+  }
+  const doc = await vscode.workspace.openTextDocument(configPath);
   await vscode.window.showTextDocument(doc);
 }
 async function listHandoffsCommand() {
@@ -5280,6 +5536,7 @@ async function startSession(context, options = {}) {
           );
           if (claimResult.ok) syncTrackerHandoffsSection(workspaceFolder);
           goalPreFill = goalPreFill || toSingleLine(candidate.summary);
+          claimedHandoff = candidate;
           vscode.window.showInformationMessage(
             `AgentSync: Picked up handoff ${candidate.handoff_id}: ${toSingleLine(candidate.summary)}`
           );
@@ -5312,7 +5569,13 @@ async function startSession(context, options = {}) {
     }
   }
   try {
-    startSessionCore(workspaceFolder, agent, goal);
+    const personality = claimedHandoff ? resolveHandoffPersonality(workspaceFolder, claimedHandoff) : null;
+    startSessionCore(workspaceFolder, agent, goal, {
+      providerId: getExecutionProviderId(agent),
+      providerLabel: getExecutionProviderLabel(agent),
+      personalityId: personality?.id || getHandoffPersonalityId(claimedHandoff) || null,
+      personalityName: personality?.name || getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(claimedHandoff)) || null
+    });
   } catch (err) {
     vscode.window.showErrorMessage(`AgentSync: ${err.message}`);
     return;
@@ -5688,7 +5951,7 @@ function startSessionReminderTimer(context) {
       reminded.add(sessionKey);
       const ageLabel = Math.floor(ageHours) + "h";
       vscode.window.showWarningMessage(
-        `AgentSync: ${state.activeSession.agent}'s session in "${folder.name}" has been running for ${ageLabel}. Time to wrap up?`,
+        `AgentSync: ${getSessionProviderInfo(state.activeSession || null).label}'s session in "${folder.name}" has been running for ${ageLabel}. Time to wrap up?`,
         "End Session",
         "Dismiss"
       ).then((choice) => {
@@ -5802,6 +6065,155 @@ async function browseAgentsCommand() {
   });
   await vscode.window.showTextDocument(doc, { preview: true });
 }
+function resolveHandoffPersonality(workspaceFolder, handoff) {
+  const catalog = getAgentCatalog(workspaceFolder);
+  if (!catalog || !Array.isArray(catalog.agents) || catalog.agents.length === 0) return null;
+  const explicitId = getHandoffPersonalityId(handoff);
+  if (explicitId) {
+    const direct = catalog.agents.find((agent) => canonicalAgentId(agent.id) === explicitId);
+    if (direct) return direct;
+  }
+  const matched = matchAgentsByCapabilities(catalog.agents, handoff?.required_capabilities || []);
+  return matched[0] || null;
+}
+function buildHandoffExecutionInstruction(handoff) {
+  const lines = [
+    String(handoff?.summary || "Continue the queued work").trim()
+  ];
+  if (handoff?.notes) {
+    lines.push("", "Notes:", String(handoff.notes).trim());
+  }
+  if (Array.isArray(handoff?.files) && handoff.files.length > 0) {
+    lines.push("", "Start with these files:");
+    handoff.files.forEach((file) => lines.push("- " + file));
+  }
+  if (handoff?.branch || handoff?.commit) {
+    lines.push("", `Branch: ${handoff?.branch || PLACEHOLDER}`);
+    lines.push(`Commit: ${handoff?.commit || PLACEHOLDER}`);
+  }
+  return lines.join("\n");
+}
+function listRunnableQueuedHandoffs(workspaceFolder, providerId = null) {
+  const currentProviderId = canonicalAgentId(providerId);
+  const { handoffs } = readHandoffs(workspaceFolder);
+  return handoffs.filter((handoff) => String(handoff?.status || "").toLowerCase() === "queued").filter((handoff) => {
+    const owners = getHandoffOwners(handoff);
+    return owners.length === 0 || !currentProviderId || owners.includes(currentProviderId);
+  }).sort((a, b) => {
+    const aStep = Number(a?.chain_step || 0);
+    const bStep = Number(b?.chain_step || 0);
+    if (aStep !== bStep) return aStep - bStep;
+    return String(a?.created_at || "").localeCompare(String(b?.created_at || ""));
+  });
+}
+async function runHandoffStep(workspaceFolder, handoff, providerLabel, options = {}) {
+  const providerId = getExecutionProviderId(providerLabel);
+  const providerDisplay = getExecutionProviderLabel(providerLabel) || String(providerLabel || "Unknown");
+  const result = claimHandoffRecord(workspaceFolder, toSingleLine(handoff?.handoff_id), providerDisplay);
+  if (!result.ok) {
+    vscode.window.showWarningMessage(
+      `AgentSync: Could not claim ${handoff?.handoff_id || "handoff"} (${result.reason || "unknown reason"}).`
+    );
+    return false;
+  }
+  syncTrackerHandoffsSection(workspaceFolder);
+  const personality = resolveHandoffPersonality(workspaceFolder, handoff);
+  const personalityId = personality?.id || getHandoffPersonalityId(handoff) || null;
+  const personalityName = personality?.name || getPersonalityDisplayName(workspaceFolder, personalityId) || null;
+  if (personality && !getHandoffPersonalityId(handoff) && toSingleLine(handoff?.handoff_id)) {
+    const store = readHandoffs(workspaceFolder);
+    const next = store.handoffs.map((entry) => {
+      if (toSingleLine(entry?.handoff_id) !== toSingleLine(handoff?.handoff_id)) return entry;
+      return {
+        ...entry,
+        suggested_agent_personality_id: personality.id,
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    });
+    writeHandoffs(workspaceFolder, { version: 1, handoffs: next });
+  }
+  if (personality) {
+    injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, personality);
+  }
+  if (options.ensureSession) {
+    startSessionCore(workspaceFolder, providerDisplay, toSingleLine(handoff?.summary), {
+      providerId,
+      providerLabel: providerDisplay,
+      personalityId,
+      personalityName
+    });
+  } else {
+    updateActiveSessionContext(workspaceFolder, {
+      ...buildSessionIdentity(workspaceFolder, providerDisplay, {
+        providerId,
+        providerLabel: providerDisplay,
+        personalityId,
+        personalityName
+      }),
+      goal: toSingleLine(handoff?.summary) || "Continue queued work"
+    });
+  }
+  const instruction = buildHandoffExecutionInstruction(handoff);
+  const assembledPrompt = personality ? assembleAgentPrompt(personality, instruction, { contextFiles: handoff?.files || [] }) : ["# Task", "", instruction].join("\n");
+  const delivery = await deliverPrompt("clipboard", { vscodeEnv: vscode.env }, assembledPrompt);
+  updateHandoffPromptCopiedFlag(workspaceFolder, handoff?.handoff_id, delivery.ok);
+  if (delivery.ok) {
+    const suffix = personalityName ? ` Personality: ${personalityName}.` : "";
+    vscode.window.showInformationMessage(
+      `AgentSync: Next step prepared for ${providerDisplay}.${suffix} Prompt copied to clipboard.`
+    );
+    return true;
+  }
+  vscode.window.showErrorMessage("AgentSync: Failed to copy the next-step prompt to clipboard.");
+  return false;
+}
+async function runNextStepCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("AgentSync: No workspace folder is open.");
+    return;
+  }
+  const state = readStateFile(workspaceFolder) || {};
+  const activeProvider = getSessionProviderInfo(state?.activeSession || null);
+  const lastProvider = getSessionProviderInfo(state?.lastSession || null);
+  const providerId = state?.sessionActive ? activeProvider.id : null;
+  const candidates = listRunnableQueuedHandoffs(workspaceFolder, providerId);
+  if (candidates.length === 0) {
+    vscode.window.showInformationMessage("AgentSync: No runnable queued handoffs found.");
+    return;
+  }
+  let handoff = candidates[0];
+  if (candidates.length > 1) {
+    const selection = await vscode.window.showQuickPick(
+      candidates.map((item) => {
+        const owners = getHandoffOwners(item);
+        const personalityName = getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(item));
+        return {
+          label: toSingleLine(item?.handoff_id) || "unknown",
+          description: toSingleLine(item?.summary) || "No summary",
+          detail: (personalityName ? "Personality: " + personalityName + " | " : "") + "Owners: " + (owners.length > 0 ? owners.join(", ") : "provider-flex"),
+          handoff: item
+        };
+      }),
+      {
+        placeHolder: "Select the next runnable handoff",
+        ignoreFocusOut: true
+      }
+    );
+    if (!selection?.handoff) return;
+    handoff = selection.handoff;
+  }
+  let providerLabel = activeProvider.label;
+  if (!state?.sessionActive) {
+    const ownerDefaults = getHandoffOwners(handoff);
+    const defaultProvider = ownerDefaults[0] || lastProvider.label || "Codex";
+    providerLabel = await promptForAgent(defaultProvider);
+    if (!providerLabel) return;
+  }
+  await runHandoffStep(workspaceFolder, handoff, providerLabel, {
+    ensureSession: !state?.sessionActive
+  });
+}
 async function runWithAgentCommand() {
   const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true });
   const catalog = getAgentCatalog(workspaceFolder);
@@ -5834,10 +6246,10 @@ async function runWithAgentCommand() {
   const result = await deliverPrompt("clipboard", { vscodeEnv: vscode.env }, assembledPrompt);
   if (result.ok) {
     vscode.window.showInformationMessage(
-      "AgentSync: Agent prompt copied to clipboard \u2014 paste into your AI tool. Agent: " + agent.name
+      "AgentSync: Personality prompt copied to clipboard \u2014 paste into your AI tool. Personality: " + agent.name
     );
   } else {
-    vscode.window.showErrorMessage("AgentSync: Failed to copy prompt to clipboard.");
+    vscode.window.showErrorMessage("AgentSync: Failed to copy the personality prompt to clipboard.");
   }
 }
 async function createPipelineCommand() {
@@ -5870,7 +6282,7 @@ async function createPipelineCommand() {
         agentId: agent2.id
       }))
     ];
-    const stepLabel = selectedAgents.length === 0 ? "Select the first agent in the pipeline" : "Select step " + (selectedAgents.length + 1) + " (or Done to finish). Current: " + selectedAgents.map((a) => a.name).join(" -> ");
+    const stepLabel = selectedAgents.length === 0 ? "Select the first personality in the pipeline" : "Select step " + (selectedAgents.length + 1) + " (or Done to finish). Current: " + selectedAgents.map((a) => a.name).join(" -> ");
     const pick = await vscode.window.showQuickPick(agentItems, {
       placeHolder: stepLabel,
       matchOnDescription: true,
@@ -5908,12 +6320,12 @@ async function createPipelineCommand() {
       handoff_id: handoffId,
       task_id: null,
       from_agent: isFirst ? currentAgent : selectedAgents[index - 1].id,
-      to_agents: [agent.id],
-      owner_mode: "single",
+      to_agents: [],
+      owner_mode: "auto",
       status: isFirst ? "queued" : "blocked",
       required_capabilities: mapAgentToCapabilities(agent),
       summary: "Pipeline step " + (index + 1) + "/" + selectedAgents.length + ": " + goal,
-      notes: "Agent: " + agent.name + " (" + agent.category + ")",
+      notes: "Personality: " + agent.name + " (" + agent.category + ")",
       no_handoff_reason: null,
       files: [],
       branch: runGit(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]) || PLACEHOLDER,
@@ -6185,13 +6597,23 @@ function activate(context) {
     const opened = await openAgentSyncTutorial(context);
     if (!opened) {
       vscode.window.showWarningMessage(
-        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
+        'AgentSync: Could not open the walkthrough. Open "Getting Started" and select AgentSync.'
       );
+    }
+  });
+  const openDocsCmd = vscode.commands.registerCommand("agentsync.openDocs", async () => {
+    const opened = await openAgentSyncDocs(context);
+    if (!opened) {
+      vscode.window.showWarningMessage("AgentSync: Could not open the documentation URL.");
     }
   });
   const openHandoffsCmd = vscode.commands.registerCommand(
     "agentsync.openHandoffs",
     () => openHandoffs()
+  );
+  const openConfigCmd = vscode.commands.registerCommand(
+    "agentsync.openConfig",
+    () => openConfigFile()
   );
   const listHandoffsCmd = vscode.commands.registerCommand(
     "agentsync.listHandoffs",
@@ -6261,6 +6683,8 @@ function activate(context) {
     if (totalChanges > 500 || filesChanged > 10) complexity = "High";
     else if (totalChanges > 100 || filesChanged > 5) complexity = "Medium";
     let sessionDuration = "No active session";
+    const sessionProvider = getSessionProviderInfo(state?.activeSession || state?.lastSession || null);
+    const sessionPersonality = getSessionPersonalityInfo(workspaceFolder, state?.activeSession || null);
     if (state?.sessionActive && state?.activeSession?.startedAt) {
       const started = parseISODate(state.activeSession.startedAt);
       if (Number.isFinite(started)) {
@@ -6269,12 +6693,21 @@ function activate(context) {
     }
     const lines = [
       `Session: ${state?.sessionActive ? "Active (" + sessionDuration + ")" : "Inactive"}`,
+      `Provider: ${sessionProvider.label || "Unknown"}`,
+      `Personality: ${state?.sessionActive ? sessionPersonality.name : "None"}`,
       `Hot files: ${hotFiles.length}`,
       `In-progress items: ${inProgressLines.length}`,
       `Open handoffs: ${openHandoffs2}`,
       `Diff: ${filesChanged} file(s), +${insertions} -${deletions}`,
       `Estimated complexity: ${complexity}`
     ];
+    const missingHealthChecks = ["Build", "Tests", "Deploy"].filter((label) => {
+      const entry = state?.health?.[label];
+      return String(entry?.status ?? entry ?? "Not configured") === "Not configured";
+    });
+    if (missingHealthChecks.length > 0) {
+      lines.push(`Setup needed: ${missingHealthChecks.join(", ")} health checks are not configured`);
+    }
     if (state?.sessionMetrics) {
       lines.push(`Files modified this session: ${state.sessionMetrics.filesModified || 0}`);
       lines.push(`Commands run: ${state.sessionMetrics.commandsRun || 0}`);
@@ -6303,6 +6736,10 @@ function activate(context) {
   const browseAgentsCmd = vscode.commands.registerCommand(
     "agentsync.browseAgents",
     () => browseAgentsCommand()
+  );
+  const runNextStepCmd = vscode.commands.registerCommand(
+    "agentsync.runNextStep",
+    () => runNextStepCommand()
   );
   const runWithAgentCmd = vscode.commands.registerCommand(
     "agentsync.runWithAgent",
@@ -6356,7 +6793,9 @@ function activate(context) {
     openDashboardCmd,
     openPanelCmd,
     openTutorialCmd,
+    openDocsCmd,
     openHandoffsCmd,
+    openConfigCmd,
     listHandoffsCmd,
     claimHandoffCmd,
     completeHandoffCmd,
@@ -6370,6 +6809,7 @@ function activate(context) {
     setRoleCmd,
     refreshCmd,
     browseAgentsCmd,
+    runNextStepCmd,
     runWithAgentCmd,
     createPipelineCmd
   );
@@ -6387,15 +6827,21 @@ if (process.env.NODE_ENV === "test") {
     canonicalAgentId,
     parseISODate,
     parseCommandArgv,
+    resolveHealthCheckProgram,
     validateHandoff,
     getOperationalState,
     formatElapsed,
+    buildSessionIdentity,
+    getSessionProviderInfo,
+    getHandoffOwners,
     scoreNextTaskCapabilities,
     normalizeHandoffStatus,
     createHandoffRecord,
     claimHandoffRecord,
     completeHandoffRecord,
     listHandoffRecords,
+    startSessionCore,
+    listRunnableQueuedHandoffs,
     syncAgencyRunsCore,
     generateContextCapsule,
     processDropZoneRequest

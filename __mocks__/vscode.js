@@ -63,6 +63,7 @@ module.exports = {
   },
   Uri: {
     file: (path) => ({ fsPath: path, scheme: 'file' }),
+    parse: (value) => ({ toString: () => value, scheme: String(value).split(':')[0] || 'https' }),
     joinPath: jest.fn()
   },
   StatusBarAlignment: { Left: 1, Right: 2 },
@@ -74,7 +75,10 @@ module.exports = {
     }
   },
   env: {
-    openExternal: jest.fn()
+    openExternal: jest.fn(),
+    clipboard: {
+      writeText: jest.fn().mockResolvedValue(undefined)
+    }
   },
   extensions: {
     getExtension: jest.fn()

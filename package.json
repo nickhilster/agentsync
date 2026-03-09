@@ -29,6 +29,7 @@
     "agents",
     "claude",
     "codex",
+    "gemini",
     "copilot",
     "coordination",
     "handoff"
@@ -141,8 +142,18 @@
         "icon": "$(debug-stop)"
       },
       {
+        "command": "agentsync.runNextStep",
+        "title": "AgentSync: Run Next Step",
+        "icon": "$(run)"
+      },
+      {
         "command": "agentsync.detectCommands",
         "title": "AgentSync: Detect Build/Test Commands"
+      },
+      {
+        "command": "agentsync.openConfig",
+        "title": "AgentSync: Open .agentsync.json",
+        "icon": "$(json)"
       },
       {
         "command": "agentsync.contextStatus",
@@ -161,17 +172,22 @@
       },
       {
         "command": "agentsync.openTutorial",
-        "title": "AgentSync: Open Interactive Tutorial",
+        "title": "AgentSync: Open Walkthrough",
         "icon": "$(mortar-board)"
       },
       {
+        "command": "agentsync.openDocs",
+        "title": "AgentSync: Open Web Docs",
+        "icon": "$(link-external)"
+      },
+      {
         "command": "agentsync.browseAgents",
-        "title": "AgentSync: Browse Agent Catalog",
+        "title": "AgentSync: Browse Personality Catalog",
         "icon": "$(library)"
       },
       {
         "command": "agentsync.runWithAgent",
-        "title": "AgentSync: Run with Agent",
+        "title": "AgentSync: Run with Personality",
         "icon": "$(rocket)"
       },
       {
@@ -212,6 +228,11 @@
           "group": "navigation@1"
         },
         {
+          "command": "agentsync.runNextStep",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@1.5"
+        },
+        {
           "command": "agentsync.endSession",
           "when": "view == agentsync.panel || view == agentsync.dashboard",
           "group": "navigation@2"
@@ -250,13 +271,18 @@
           "command": "agentsync.openTutorial",
           "when": "view == agentsync.panel || view == agentsync.dashboard",
           "group": "navigation@7"
+        },
+        {
+          "command": "agentsync.openDocs",
+          "when": "view == agentsync.panel || view == agentsync.dashboard",
+          "group": "navigation@7.5"
         }
       ]
     },
     "walkthroughs": [
       {
         "id": "agentsync.gettingStarted",
-        "title": "AgentSync Interactive Tutorial",
+        "title": "AgentSync Walkthrough",
         "description": "A guided setup for new users to initialize AgentSync, run a session, and close it with clear handoff context.",
         "steps": [
           {
