@@ -27,6 +27,16 @@ const DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
   copilot: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] }
 })
 
+const EXECUTION_PROVIDER_DEFS = Object.freeze([
+  { id: 'claude', label: 'Claude' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'gemini', label: 'Gemini' },
+  { id: 'copilot', label: 'Copilot' }
+])
+const EXECUTION_PROVIDER_BY_ID = Object.freeze(
+  Object.fromEntries(EXECUTION_PROVIDER_DEFS.map((provider) => [provider.id, provider]))
+)
+
 // Roles available for workspace user
 const ROLE_LIST = [
   'founder_pm',
@@ -51,15 +61,6 @@ const AGENT_CATEGORY_COLORS = Object.freeze({
   strategy: '#10b981'
 })
 
-const DEFAULT_AGENT_CATALOG_CONFIG = Object.freeze({
-  bundled: true,
-  workspaceDir: '.agentsync/agents',
-  categories: [
-    'engineering', 'design', 'marketing', 'product', 'project-management',
-    'support', 'testing', 'specialized', 'spatial-computing', 'strategy'
-  ]
-})
-
 const DEFAULT_EXECUTION_CHANNELS_CONFIG = Object.freeze({
   preferred: 'clipboard',
   fallback: 'clipboard'
@@ -82,9 +83,10 @@ module.exports = {
   DEFAULT_END_SESSION_ZERO_TOUCH,
   DEFAULT_START_SESSION_ZERO_TOUCH,
   DEFAULT_HANDOFF_ROUTING_DEFAULTS,
+  EXECUTION_PROVIDER_DEFS,
+  EXECUTION_PROVIDER_BY_ID,
   ROLE_LIST,
   AGENT_CATEGORY_COLORS,
-  DEFAULT_AGENT_CATALOG_CONFIG,
   DEFAULT_EXECUTION_CHANNELS_CONFIG,
   CHAIN_STATUSES
 }

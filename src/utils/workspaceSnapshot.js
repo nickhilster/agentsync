@@ -1,5 +1,10 @@
 'use strict'
 
+const { PLACEHOLDER } = require('./constants')
+const { parseTracker, getInProgressLines } = require('./text')
+const { readTracker, readStateFile, readHandoffs } = require('./storage')
+const { readAgentSyncConfig } = require('./workspace')
+
 /**
  * Cache workspace reads and derived tracker/session data.
  * This keeps status bar + tree + dashboard refreshes consistent and cheap.
@@ -136,6 +141,44 @@ class WorkspaceSnapshotService {
   }
 }
 
+let _workspaceSnapshotService = null
+
+function getWorkspaceSnapshotService() {
+  if (_workspaceSnapshotService) return _workspaceSnapshotService
+
+  _workspaceSnapshotService = new WorkspaceSnapshotService({
+    readTracker,
+    parseTracker,
+    readStateFile,
+    readConfig: readAgentSyncConfig,
+    readHandoffs,
+    getInProgressLines,
+    placeholder: PLACEHOLDER
+  })
+  return _workspaceSnapshotService
+}
+
+/**
+ * Read a cached workspace snapshot.
+ */
+function getWorkspaceSnapshot(workspaceFolder, options = {}) {
+  return getWorkspaceSnapshotService().getSnapshot(workspaceFolder, options)
+}
+
+/**
+ * Invalidate per-workspace snapshot caches.
+ */
+function invalidateWorkspaceCaches(workspaceFolder) {
+  if (!workspaceFolder) {
+    getWorkspaceSnapshotService().invalidateAll()
+    return
+  }
+  getWorkspaceSnapshotService().invalidate(workspaceFolder)
+}
+
 module.exports = {
-  WorkspaceSnapshotService
+  WorkspaceSnapshotService,
+  getWorkspaceSnapshotService,
+  getWorkspaceSnapshot,
+  invalidateWorkspaceCaches
 }

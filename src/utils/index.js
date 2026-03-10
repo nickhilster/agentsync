@@ -1,8 +1,5 @@
 'use strict'
 
-// Barrel re-export for all utils modules.
-// This allows both `require('./utils')` and `require('./utils/text')` etc.
-
 module.exports = {
   ...require('./constants'),
   ...require('./paths'),
@@ -11,6 +8,13 @@ module.exports = {
   ...require('./git'),
   ...require('./workspace'),
   ...require('./workspaceSnapshot'),
+  ...require('./trackerWarnings'),
+  ...require('./storage'),
   ...require('./agentCatalog'),
-  ...require('./executionChannels')
+  ...require('./executionChannels'),
+  ...require('./handoffs'),
+  ...require('./health'),
+  ...require('./session'),
+  ...require('./automation'),
+  ...require('./context')
 }

@@ -124,12 +124,22 @@ function formatElapsed(ms) {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
 }
 
+function getInProgressLines(trackerContent) {
+  if (!trackerContent) return []
+  const body = getSectionBody(trackerContent, 'In Progress')
+  return body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && line !== '*Nothing active*' && !line.startsWith('<!--'))
+}
+
 module.exports = {
   isEmptyValue,
   escapeRegExp,
   parseTracker,
   getSectionBody,
   setSectionBody,
+  getInProgressLines,
   canonicalAgentId,
   toSingleLine,
   truncateSingleLine,

@@ -28,11 +28,20 @@ var require_constants = __commonJS({
       autoClaimHandoff: false,
       promptPreFill: true
     });
-    var DEFAULT_HANDOFF_ROUTING_DEFAULTS2 = Object.freeze({
+    var DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
       claude: { owner_mode: "single", to_agents: ["codex"], required_capabilities: [] },
       codex: { owner_mode: "single", to_agents: ["claude"], required_capabilities: [] },
       copilot: { owner_mode: "single", to_agents: ["codex"], required_capabilities: [] }
     });
+    var EXECUTION_PROVIDER_DEFS2 = Object.freeze([
+      { id: "claude", label: "Claude" },
+      { id: "codex", label: "Codex" },
+      { id: "gemini", label: "Gemini" },
+      { id: "copilot", label: "Copilot" }
+    ]);
+    var EXECUTION_PROVIDER_BY_ID2 = Object.freeze(
+      Object.fromEntries(EXECUTION_PROVIDER_DEFS2.map((provider) => [provider.id, provider]))
+    );
     var ROLE_LIST2 = [
       "founder_pm",
       "ux_designer",
@@ -40,7 +49,7 @@ var require_constants = __commonJS({
       "non_technical",
       "systems_designer"
     ];
-    var AGENT_CATEGORY_COLORS2 = Object.freeze({
+    var AGENT_CATEGORY_COLORS = Object.freeze({
       engineering: "#00d4aa",
       design: "#a855f7",
       marketing: "#3b82f6",
@@ -51,22 +60,6 @@ var require_constants = __commonJS({
       specialized: "#6366f1",
       "spatial-computing": "#06ffd0",
       strategy: "#10b981"
-    });
-    var DEFAULT_AGENT_CATALOG_CONFIG = Object.freeze({
-      bundled: true,
-      workspaceDir: ".agentsync/agents",
-      categories: [
-        "engineering",
-        "design",
-        "marketing",
-        "product",
-        "project-management",
-        "support",
-        "testing",
-        "specialized",
-        "spatial-computing",
-        "strategy"
-      ]
     });
     var DEFAULT_EXECUTION_CHANNELS_CONFIG = Object.freeze({
       preferred: "clipboard",
@@ -85,10 +78,11 @@ var require_constants = __commonJS({
       OPEN_HANDOFF_STATUSES: OPEN_HANDOFF_STATUSES2,
       DEFAULT_END_SESSION_ZERO_TOUCH: DEFAULT_END_SESSION_ZERO_TOUCH2,
       DEFAULT_START_SESSION_ZERO_TOUCH: DEFAULT_START_SESSION_ZERO_TOUCH2,
-      DEFAULT_HANDOFF_ROUTING_DEFAULTS: DEFAULT_HANDOFF_ROUTING_DEFAULTS2,
+      DEFAULT_HANDOFF_ROUTING_DEFAULTS,
+      EXECUTION_PROVIDER_DEFS: EXECUTION_PROVIDER_DEFS2,
+      EXECUTION_PROVIDER_BY_ID: EXECUTION_PROVIDER_BY_ID2,
       ROLE_LIST: ROLE_LIST2,
-      AGENT_CATEGORY_COLORS: AGENT_CATEGORY_COLORS2,
-      DEFAULT_AGENT_CATALOG_CONFIG,
+      AGENT_CATEGORY_COLORS,
       DEFAULT_EXECUTION_CHANNELS_CONFIG,
       CHAIN_STATUSES
     };
@@ -197,7 +191,7 @@ ${normalizedBody}
     function toSingleLine2(value) {
       return String(value || "").replace(/[\r\n]+/g, " ").trim();
     }
-    function truncateSingleLine2(value, maxLength) {
+    function truncateSingleLine(value, maxLength) {
       const line = toSingleLine2(value);
       if (maxLength && line.length > maxLength) {
         return line.slice(0, maxLength - 3) + "...";
@@ -210,15 +204,21 @@ ${normalizedBody}
       const minutes = totalMinutes % 60;
       return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
     }
+    function getInProgressLines(trackerContent) {
+      if (!trackerContent) return [];
+      const body = getSectionBody2(trackerContent, "In Progress");
+      return body.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && line !== "*Nothing active*" && !line.startsWith("<!--"));
+    }
     module2.exports = {
       isEmptyValue: isEmptyValue2,
       escapeRegExp: escapeRegExp2,
       parseTracker: parseTracker2,
       getSectionBody: getSectionBody2,
       setSectionBody: setSectionBody2,
+      getInProgressLines,
       canonicalAgentId: canonicalAgentId2,
       toSingleLine: toSingleLine2,
-      truncateSingleLine: truncateSingleLine2,
+      truncateSingleLine,
       formatElapsed: formatElapsed2
     };
   }
@@ -229,7 +229,7 @@ var require_io = __commonJS({
   "src/utils/io.js"(exports2, module2) {
     "use strict";
     var fs2 = require("fs");
-    function atomicWriteFileSync2(filePath, content, encoding = "utf8") {
+    function atomicWriteFileSync(filePath, content, encoding = "utf8") {
       const tmpPath = `${filePath}.tmp`;
       fs2.writeFileSync(tmpPath, content, encoding);
       fs2.renameSync(tmpPath, filePath);
@@ -270,7 +270,7 @@ var require_io = __commonJS({
       if (current.length > 0) args.push(current);
       return args;
     }
-    function createNonce2() {
+    function createNonce() {
       const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
       let text = "";
       for (let i = 0; i < 32; i += 1) {
@@ -279,10 +279,10 @@ var require_io = __commonJS({
       return text;
     }
     module2.exports = {
-      atomicWriteFileSync: atomicWriteFileSync2,
+      atomicWriteFileSync,
       parseISODate: parseISODate2,
       parseCommandArgv: parseCommandArgv2,
-      createNonce: createNonce2
+      createNonce
     };
   }
 });
@@ -291,9 +291,11 @@ var require_io = __commonJS({
 var require_git = __commonJS({
   "src/utils/git.js"(exports2, module2) {
     "use strict";
-    var cp2 = require("child_process");
+    var cp = require("child_process");
+    var HOT_FILES_CACHE_TTL_MS = 4e3;
+    var _hotFilesCache = /* @__PURE__ */ new Map();
     function runGit2(workspaceFolder, args) {
-      const result = cp2.spawnSync("git", args, {
+      const result = cp.spawnSync("git", args, {
         cwd: workspaceFolder.uri.fsPath,
         encoding: "utf8"
       });
@@ -301,14 +303,14 @@ var require_git = __commonJS({
       return result.stdout.trim();
     }
     function runGitExitCode2(workspaceFolder, args) {
-      const result = cp2.spawnSync("git", args, {
+      const result = cp.spawnSync("git", args, {
         cwd: workspaceFolder.uri.fsPath,
         encoding: "utf8"
       });
       if (result.error || typeof result.status !== "number") return 1;
       return result.status;
     }
-    function detectHotFiles2(workspaceFolder) {
+    function detectHotFiles(workspaceFolder) {
       const collected = /* @__PURE__ */ new Set();
       const addLines = (output) => {
         if (!output) return;
@@ -321,6 +323,18 @@ var require_git = __commonJS({
         addLines(runGit2(workspaceFolder, ["show", "--pretty=format:", "--name-only", "HEAD"]));
       }
       return [...collected].sort((a, b) => a.localeCompare(b));
+    }
+    function getHotFilesCached2(workspaceFolder, options = {}) {
+      const { force = false } = options;
+      const key = workspaceFolder.uri.fsPath;
+      const cached = _hotFilesCache.get(key);
+      const now = Date.now();
+      if (!force && cached && now - cached.fetchedAt <= HOT_FILES_CACHE_TTL_MS && Array.isArray(cached.files)) {
+        return cached.files;
+      }
+      const files = detectHotFiles(workspaceFolder);
+      _hotFilesCache.set(key, { files, fetchedAt: now });
+      return files;
     }
     function normalizeRepoRelativePath2(filePath) {
       return String(filePath || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -355,25 +369,29 @@ var require_git = __commonJS({
       }
       if (hotFiles && hotFiles.length > 0) {
         const extensions = new Set(
-          hotFiles.map((f) => {
-            const dot = f.lastIndexOf(".");
-            return dot >= 0 ? f.slice(dot).toLowerCase() : "";
+          hotFiles.map((file) => {
+            const dot = file.lastIndexOf(".");
+            return dot >= 0 ? file.slice(dot).toLowerCase() : "";
           }).filter(Boolean)
         );
         const testFiles = hotFiles.filter(
-          (f) => /\.(test|spec|e2e)\./i.test(f) || /\/__tests__\//i.test(f) || /\/test\//i.test(f)
+          (file) => /\.(test|spec|e2e)\./i.test(file) || /\/__tests__\//i.test(file) || /\/test\//i.test(file)
         );
         if (testFiles.length > 0) caps.push("testing");
-        if (extensions.has(".css") || extensions.has(".scss") || extensions.has(".figma")) caps.push("design");
-        if (extensions.has(".md") || extensions.has(".txt") || extensions.has(".rst")) caps.push("documentation");
-        if (extensions.has(".yml") || extensions.has(".yaml") || extensions.has(".dockerfile") || hotFiles.some((f) => f.includes("Dockerfile") || f.includes(".github/workflows"))) {
+        if (extensions.has(".css") || extensions.has(".scss") || extensions.has(".figma")) {
+          caps.push("design");
+        }
+        if (extensions.has(".md") || extensions.has(".txt") || extensions.has(".rst")) {
+          caps.push("documentation");
+        }
+        if (extensions.has(".yml") || extensions.has(".yaml") || extensions.has(".dockerfile") || hotFiles.some((file) => file.includes("Dockerfile") || file.includes(".github/workflows"))) {
           caps.push("automation");
         }
       }
       const reason = caps.length ? "Detected " + caps.join(", ") : "Routine change";
       return { tier, capabilities: caps, reason };
     }
-    function detectSignatureChanges2(workspaceFolder, hotFiles) {
+    function detectSignatureChanges(workspaceFolder, hotFiles) {
       if (!hotFiles || hotFiles.length === 0) return [];
       const normalizedHotFiles = hotFiles.map((file) => normalizeRepoRelativePath2(file)).filter((file) => file.length > 0);
       if (normalizedHotFiles.length === 0) return [];
@@ -414,11 +432,12 @@ var require_git = __commonJS({
     module2.exports = {
       runGit: runGit2,
       runGitExitCode: runGitExitCode2,
-      detectHotFiles: detectHotFiles2,
+      detectHotFiles,
+      getHotFilesCached: getHotFilesCached2,
       normalizeRepoRelativePath: normalizeRepoRelativePath2,
       parseDiffHeaderPath,
       scoreNextTaskCapabilities: scoreNextTaskCapabilities2,
-      detectSignatureChanges: detectSignatureChanges2
+      detectSignatureChanges
     };
   }
 });
@@ -427,18 +446,28 @@ var require_git = __commonJS({
 var require_workspace = __commonJS({
   "src/utils/workspace.js"(exports2, module2) {
     "use strict";
-    var vscode2 = require("vscode");
+    var fs2 = require("fs");
+    var { workspace, window } = require("vscode");
+    var { getConfigPath: getConfigPath2 } = require_paths();
+    var {
+      canonicalAgentId: canonicalAgentId2,
+      DEFAULT_STALE_HOURS: DEFAULT_STALE_HOURS2,
+      DEFAULT_END_SESSION_ZERO_TOUCH: DEFAULT_END_SESSION_ZERO_TOUCH2,
+      DEFAULT_HANDOFF_ROUTING_DEFAULTS,
+      DEFAULT_EXECUTION_CHANNELS_CONFIG
+    } = require_constants();
+    var { atomicWriteFileSync } = require_io();
     function getActiveWorkspaceFolder2() {
-      const activeUri = vscode2.window.activeTextEditor?.document?.uri;
+      const activeUri = window.activeTextEditor?.document?.uri;
       if (activeUri) {
-        const activeFolder = vscode2.workspace.getWorkspaceFolder(activeUri);
+        const activeFolder = workspace.getWorkspaceFolder(activeUri);
         if (activeFolder) return activeFolder;
       }
-      return vscode2.workspace.workspaceFolders?.[0] ?? null;
+      return workspace.workspaceFolders?.[0] ?? null;
     }
     async function resolveWorkspaceFolder2(options = {}) {
       const { allowPick = true } = options;
-      const folders = vscode2.workspace.workspaceFolders;
+      const folders = workspace.workspaceFolders;
       if (!folders || folders.length === 0) return null;
       const activeFolder = getActiveWorkspaceFolder2();
       if (activeFolder) return activeFolder;
@@ -450,20 +479,241 @@ var require_workspace = __commonJS({
         description: folder.uri.fsPath,
         folder
       }));
-      const selected = await vscode2.window.showQuickPick(picks, {
+      const selected = await window.showQuickPick(picks, {
         placeHolder: "Select a workspace folder for AgentSync"
       });
       return selected?.folder ?? null;
     }
     function getWorkspaceLabelPrefix2(workspaceFolder) {
-      const folders = vscode2.workspace.workspaceFolders;
+      const folders = workspace.workspaceFolders;
       if (!folders || folders.length <= 1) return "";
       return `[${workspaceFolder.name}] `;
+    }
+    function readAgentSyncConfig2(workspaceFolder) {
+      const settings = workspace.getConfiguration("agentsync", workspaceFolder?.uri);
+      const settingsAutoStale = Number(settings.get("autoStaleSessionMinutes", 0));
+      const toNumber = (value, fallback) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      };
+      const normalizeStartSessionAutomation = (value = {}) => ({
+        enabled: value.enabled === true,
+        autoClaimHandoff: value.autoClaimHandoff === true,
+        promptPreFill: value.promptPreFill === void 0 ? true : value.promptPreFill === true
+      });
+      const normalizeEndSessionAutomation = (value = {}) => {
+        const maxSummaryLength = Math.max(
+          60,
+          Math.min(
+            260,
+            Math.round(
+              toNumber(value.maxSummaryLength, DEFAULT_END_SESSION_ZERO_TOUCH2.maxSummaryLength)
+            )
+          )
+        );
+        return {
+          enabled: value.enabled === true,
+          autonomy: String(value.autonomy || DEFAULT_END_SESSION_ZERO_TOUCH2.autonomy).trim() || DEFAULT_END_SESSION_ZERO_TOUCH2.autonomy,
+          copyPromptToClipboard: value.copyPromptToClipboard === void 0 ? DEFAULT_END_SESSION_ZERO_TOUCH2.copyPromptToClipboard : value.copyPromptToClipboard === true,
+          maxSummaryLength
+        };
+      };
+      const normalizeRoute = (route = {}) => {
+        const ownerMode = String(route.owner_mode || "").toLowerCase();
+        const toAgents = Array.isArray(route.to_agents) ? route.to_agents.map((agent) => canonicalAgentId2(agent)).filter(Boolean) : [];
+        const requiredCapabilities = Array.isArray(route.required_capabilities) ? route.required_capabilities.map((cap) => String(cap || "").trim()).filter(Boolean) : [];
+        if (ownerMode === "single" && toAgents.length === 1) {
+          return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
+        }
+        if (ownerMode === "shared" && toAgents.length === 2) {
+          return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
+        }
+        if (ownerMode === "auto" && requiredCapabilities.length > 0) {
+          return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities };
+        }
+        return null;
+      };
+      const defaultRoutes = Object.fromEntries(
+        Object.entries(DEFAULT_HANDOFF_ROUTING_DEFAULTS).map(([agentId, route]) => [
+          agentId,
+          { ...route }
+        ])
+      );
+      const normalizeAutomation = (automation = {}) => {
+        const endSessionZeroTouch = normalizeEndSessionAutomation(automation.endSessionZeroTouch || {});
+        const startSessionZeroTouch = normalizeStartSessionAutomation(
+          automation.startSessionZeroTouch || {}
+        );
+        const configured = automation.handoffRoutingDefaults || {};
+        const handoffRoutingDefaults = { ...defaultRoutes };
+        if (configured && typeof configured === "object") {
+          for (const [rawAgentId, route] of Object.entries(configured)) {
+            const agentId = canonicalAgentId2(rawAgentId);
+            if (!agentId) continue;
+            const normalizedRoute = normalizeRoute(route);
+            if (normalizedRoute) handoffRoutingDefaults[agentId] = normalizedRoute;
+          }
+        }
+        return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults };
+      };
+      const DEFAULT_TOKEN_BUDGET = Object.freeze({
+        maxTokensDefault: 4e3,
+        batchSimilarTasks: true,
+        enableCaching: true,
+        sessionDurationWarningMinutes: 0
+      });
+      const normalizeTokenBudget = (value = {}) => ({
+        maxTokensDefault: toNumber(value.maxTokensDefault, DEFAULT_TOKEN_BUDGET.maxTokensDefault),
+        batchSimilarTasks: value.batchSimilarTasks === void 0 ? true : value.batchSimilarTasks === true,
+        enableCaching: value.enableCaching === void 0 ? true : value.enableCaching === true,
+        sessionDurationWarningMinutes: Math.max(
+          0,
+          Math.round(
+            toNumber(
+              value.sessionDurationWarningMinutes,
+              DEFAULT_TOKEN_BUDGET.sessionDurationWarningMinutes
+            )
+          )
+        )
+      });
+      const normalizeModelTiers = (value = {}) => {
+        const result = {};
+        for (const [tier, def] of Object.entries(value)) {
+          if (tier !== "worker" && tier !== "lead") continue;
+          result[tier] = {
+            models: Array.isArray(def?.models) ? def.models.map((model) => String(model).trim()).filter(Boolean) : [],
+            useCases: Array.isArray(def?.useCases) ? def.useCases.map((useCase) => String(useCase).trim()).filter(Boolean) : []
+          };
+        }
+        return Object.keys(result).length > 0 ? result : null;
+      };
+      const defaults = {
+        staleAfterHours: DEFAULT_STALE_HOURS2,
+        autoStaleSessionMinutes: Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0 ? settingsAutoStale : 0,
+        commands: {},
+        requireHandoffOnEndSession: false,
+        automation: normalizeAutomation({}),
+        modelTiers: null,
+        tokenBudget: normalizeTokenBudget({}),
+        userProfile: null,
+        dashboardShortcuts: null,
+        sessionDurationWarningMinutes: 0,
+        executionChannels: { ...DEFAULT_EXECUTION_CHANNELS_CONFIG },
+        agentCatalog: null
+      };
+      const configPath = getConfigPath2(workspaceFolder);
+      if (!fs2.existsSync(configPath)) return defaults;
+      try {
+        const raw = fs2.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
+        const parsed = JSON.parse(raw);
+        const staleAfterHours = Number(parsed.staleAfterHours);
+        const autoStaleSessionMinutes = Number(parsed.autoStaleSessionMinutes);
+        return {
+          staleAfterHours: Number.isFinite(staleAfterHours) && staleAfterHours >= 0 ? staleAfterHours : DEFAULT_STALE_HOURS2,
+          autoStaleSessionMinutes: Number.isFinite(autoStaleSessionMinutes) && autoStaleSessionMinutes >= 0 ? autoStaleSessionMinutes : 0,
+          commands: parsed.commands && typeof parsed.commands === "object" ? parsed.commands : {},
+          requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
+          automation: normalizeAutomation(parsed.automation || {}),
+          modelTiers: normalizeModelTiers(parsed.modelTiers || {}),
+          tokenBudget: normalizeTokenBudget(parsed.tokenBudget || {}),
+          userProfile: parsed.userProfile && typeof parsed.userProfile === "object" ? parsed.userProfile : null,
+          dashboardShortcuts: Array.isArray(parsed.dashboardShortcuts) ? parsed.dashboardShortcuts : null,
+          sessionDurationWarningMinutes: toNumber(parsed.sessionDurationWarningMinutes, 0),
+          executionChannels: parsed.executionChannels && typeof parsed.executionChannels === "object" ? parsed.executionChannels : { ...DEFAULT_EXECUTION_CHANNELS_CONFIG },
+          agentCatalog: parsed.agentCatalog && typeof parsed.agentCatalog === "object" ? parsed.agentCatalog : null
+        };
+      } catch {
+        return defaults;
+      }
+    }
+    function writeConfigFile2(workspaceFolder, data) {
+      const configPath = getConfigPath2(workspaceFolder);
+      atomicWriteFileSync(configPath, JSON.stringify(data, null, 2));
     }
     module2.exports = {
       getActiveWorkspaceFolder: getActiveWorkspaceFolder2,
       resolveWorkspaceFolder: resolveWorkspaceFolder2,
-      getWorkspaceLabelPrefix: getWorkspaceLabelPrefix2
+      getWorkspaceLabelPrefix: getWorkspaceLabelPrefix2,
+      readAgentSyncConfig: readAgentSyncConfig2,
+      writeConfigFile: writeConfigFile2
+    };
+  }
+});
+
+// src/utils/storage.js
+var require_storage = __commonJS({
+  "src/utils/storage.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var {
+      getTrackerPath: getTrackerPath2,
+      getStatePath: getStatePath2,
+      getHandoffsPath: getHandoffsPath2,
+      getAgentSyncDir: getAgentSyncDir2
+    } = require_paths();
+    var { atomicWriteFileSync } = require_io();
+    function readTracker2(workspaceFolder) {
+      try {
+        return fs2.readFileSync(getTrackerPath2(workspaceFolder), "utf8");
+      } catch {
+        return null;
+      }
+    }
+    function writeTracker(workspaceFolder, content) {
+      atomicWriteFileSync(getTrackerPath2(workspaceFolder), content);
+    }
+    function readStateFile2(workspaceFolder) {
+      const statePath = getStatePath2(workspaceFolder);
+      if (!fs2.existsSync(statePath)) return null;
+      try {
+        return JSON.parse(fs2.readFileSync(statePath, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function writeStateFile2(workspaceFolder, data) {
+      try {
+        fs2.mkdirSync(getAgentSyncDir2(workspaceFolder), { recursive: true });
+        const statePath = getStatePath2(workspaceFolder);
+        atomicWriteFileSync(statePath, JSON.stringify(data, null, 2));
+      } catch (err) {
+        console.error("[AgentSync] writeStateFile error:", err);
+      }
+    }
+    function readHandoffs2(workspaceFolder) {
+      const handoffsPath = getHandoffsPath2(workspaceFolder);
+      if (!fs2.existsSync(handoffsPath)) {
+        return { exists: false, handoffs: [], error: null };
+      }
+      try {
+        const raw = fs2.readFileSync(handoffsPath, "utf8").replace(/^\uFEFF/, "");
+        const parsed = JSON.parse(raw);
+        const handoffs = Array.isArray(parsed?.handoffs) ? parsed.handoffs : [];
+        return { exists: true, handoffs, error: null };
+      } catch (err) {
+        return {
+          exists: true,
+          handoffs: [],
+          error: err && err.message ? err.message : "Invalid JSON"
+        };
+      }
+    }
+    function writeHandoffs2(workspaceFolder, data) {
+      try {
+        fs2.mkdirSync(getAgentSyncDir2(workspaceFolder), { recursive: true });
+        const handoffsPath = getHandoffsPath2(workspaceFolder);
+        atomicWriteFileSync(handoffsPath, JSON.stringify(data, null, 2));
+      } catch (err) {
+        console.error("[AgentSync] writeHandoffs error:", err);
+      }
+    }
+    module2.exports = {
+      readTracker: readTracker2,
+      writeTracker,
+      readStateFile: readStateFile2,
+      writeStateFile: writeStateFile2,
+      readHandoffs: readHandoffs2,
+      writeHandoffs: writeHandoffs2
     };
   }
 });
@@ -472,7 +722,11 @@ var require_workspace = __commonJS({
 var require_workspaceSnapshot = __commonJS({
   "src/utils/workspaceSnapshot.js"(exports2, module2) {
     "use strict";
-    var WorkspaceSnapshotService2 = class {
+    var { PLACEHOLDER: PLACEHOLDER2 } = require_constants();
+    var { parseTracker: parseTracker2, getInProgressLines } = require_text();
+    var { readTracker: readTracker2, readStateFile: readStateFile2, readHandoffs: readHandoffs2 } = require_storage();
+    var { readAgentSyncConfig: readAgentSyncConfig2 } = require_workspace();
+    var WorkspaceSnapshotService = class {
       /**
        * @param {{
        *   readTracker: (workspaceFolder: any) => string | null,
@@ -585,9 +839,77 @@ var require_workspaceSnapshot = __commonJS({
         return Math.abs(hash).toString(16);
       }
     };
+    var _workspaceSnapshotService = null;
+    function getWorkspaceSnapshotService() {
+      if (_workspaceSnapshotService) return _workspaceSnapshotService;
+      _workspaceSnapshotService = new WorkspaceSnapshotService({
+        readTracker: readTracker2,
+        parseTracker: parseTracker2,
+        readStateFile: readStateFile2,
+        readConfig: readAgentSyncConfig2,
+        readHandoffs: readHandoffs2,
+        getInProgressLines,
+        placeholder: PLACEHOLDER2
+      });
+      return _workspaceSnapshotService;
+    }
+    function getWorkspaceSnapshot2(workspaceFolder, options = {}) {
+      return getWorkspaceSnapshotService().getSnapshot(workspaceFolder, options);
+    }
+    function invalidateWorkspaceCaches2(workspaceFolder) {
+      if (!workspaceFolder) {
+        getWorkspaceSnapshotService().invalidateAll();
+        return;
+      }
+      getWorkspaceSnapshotService().invalidate(workspaceFolder);
+    }
     module2.exports = {
-      WorkspaceSnapshotService: WorkspaceSnapshotService2
+      WorkspaceSnapshotService,
+      getWorkspaceSnapshotService,
+      getWorkspaceSnapshot: getWorkspaceSnapshot2,
+      invalidateWorkspaceCaches: invalidateWorkspaceCaches2
     };
+  }
+});
+
+// src/utils/trackerWarnings.js
+var require_trackerWarnings = __commonJS({
+  "src/utils/trackerWarnings.js"(exports2, module2) {
+    "use strict";
+    var { isEmptyValue: isEmptyValue2 } = require_text();
+    var { runGit: runGit2, runGitExitCode: runGitExitCode2 } = require_git();
+    var { readAgentSyncConfig: readAgentSyncConfig2 } = require_workspace();
+    function getTrackerWarnings2(workspaceFolder, tracker) {
+      const warnings = [];
+      const config = readAgentSyncConfig2(workspaceFolder);
+      if (!isEmptyValue2(tracker.date)) {
+        const parsed = Date.parse(tracker.date);
+        if (Number.isFinite(parsed)) {
+          const ageMs = Date.now() - parsed;
+          if (ageMs > config.staleAfterHours * 60 * 60 * 1e3) {
+            const ageHours = Math.floor(ageMs / (60 * 60 * 1e3));
+            warnings.push(`Tracker is stale (${ageHours}h old).`);
+          }
+        }
+      }
+      const currentBranch = runGit2(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      if (currentBranch && !isEmptyValue2(tracker.branch) && tracker.branch !== currentBranch) {
+        warnings.push(`Branch mismatch: tracker=${tracker.branch}, current=${currentBranch}.`);
+      }
+      if (!isEmptyValue2(tracker.commit)) {
+        const exitCode = runGitExitCode2(workspaceFolder, [
+          "merge-base",
+          "--is-ancestor",
+          tracker.commit,
+          "HEAD"
+        ]);
+        if (exitCode !== 0) {
+          warnings.push(`Tracker commit ${tracker.commit} is not in current HEAD history.`);
+        }
+      }
+      return warnings;
+    }
+    module2.exports = { getTrackerWarnings: getTrackerWarnings2 };
   }
 });
 
@@ -634,6 +956,7 @@ var require_agentCatalog = __commonJS({
       strategy: ["strategy", "analysis"]
     };
     var FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+    var _catalogCache = /* @__PURE__ */ new Map();
     function parseFrontmatter(content) {
       const warnings = [];
       const match = content.match(FRONTMATTER_REGEX);
@@ -873,6 +1196,22 @@ var require_agentCatalog = __commonJS({
       });
       return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).map((s) => s.agent);
     }
+    function getAgentCatalog2(workspaceFolder) {
+      const cacheKey = workspaceFolder?.uri?.fsPath || "__global__";
+      const cached = _catalogCache.get(cacheKey);
+      if (cached) return cached;
+      const bundledDir = path2.join(__dirname, "..", "..", "templates", "agents");
+      const rootDirs = [bundledDir];
+      if (workspaceFolder) {
+        const workspaceAgentsDir = path2.join(workspaceFolder.uri.fsPath, ".agentsync", "agents");
+        if (fs2.existsSync(workspaceAgentsDir)) {
+          rootDirs.push(workspaceAgentsDir);
+        }
+      }
+      const catalog = buildCatalog2({ rootDirs });
+      _catalogCache.set(cacheKey, catalog);
+      return catalog;
+    }
     module2.exports = {
       DEFAULT_CATEGORY_DIRS,
       CATEGORY_COLOR_FALLBACKS,
@@ -884,7 +1223,8 @@ var require_agentCatalog = __commonJS({
       createSystemPrompt,
       createPrompt,
       mapAgentToCapabilities: mapAgentToCapabilities2,
-      matchAgentsByCapabilities: matchAgentsByCapabilities2
+      matchAgentsByCapabilities: matchAgentsByCapabilities2,
+      getAgentCatalog: getAgentCatalog2
     };
   }
 });
@@ -990,7 +1330,7 @@ var require_executionChannels = __commonJS({
         injectPersonalitySection(filePath, agent);
       }
     }
-    function removePersonalityFromWorkspace2(workspaceRoot) {
+    function removePersonalityFromWorkspace(workspaceRoot) {
       const files = [
         path2.join(workspaceRoot, "CLAUDE.md"),
         path2.join(workspaceRoot, "AGENTS.md"),
@@ -1008,8 +1348,907 @@ var require_executionChannels = __commonJS({
       injectPersonalitySection,
       removePersonalitySection,
       injectPersonalityToWorkspace: injectPersonalityToWorkspace2,
-      removePersonalityFromWorkspace: removePersonalityFromWorkspace2
+      removePersonalityFromWorkspace
     };
+  }
+});
+
+// src/utils/handoffs.js
+var require_handoffs = __commonJS({
+  "src/utils/handoffs.js"(exports2, module2) {
+    var {
+      OPEN_HANDOFF_STATUSES: OPEN_HANDOFF_STATUSES2
+    } = require_constants();
+    var {
+      canonicalAgentId: canonicalAgentId2,
+      toSingleLine: toSingleLine2
+    } = require_text();
+    var {
+      readHandoffs: readHandoffs2,
+      writeHandoffs: writeHandoffs2,
+      readTracker: readTracker2,
+      writeTracker
+    } = require_storage();
+    var { setSectionBody: setSectionBody2 } = require_text();
+    var HANDOFF_ALLOWED_STATUSES = /* @__PURE__ */ new Set([
+      "queued",
+      "in_progress",
+      "blocked",
+      "ready_for_review",
+      "approved",
+      "merged",
+      "escalated"
+    ]);
+    function isOpenHandoff(handoff) {
+      return OPEN_HANDOFF_STATUSES2.has(String(handoff?.status || "").toLowerCase());
+    }
+    function validateHandoff2(handoff) {
+      const errors = [];
+      const skipReason = handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== void 0 ? String(handoff.no_handoff_reason || "").trim() : null;
+      const isSkip = Boolean(skipReason);
+      if (!handoff.from_agent) errors.push("from_agent is required");
+      if (!handoff.summary && !isSkip) errors.push("summary is required");
+      if (!handoff.owner_mode) errors.push("owner_mode is required");
+      if (!handoff.status) errors.push("status is required");
+      const mode = String(handoff.owner_mode || "").toLowerCase();
+      const toAgents = Array.isArray(handoff.to_agents) ? handoff.to_agents : [];
+      if (mode === "single") {
+        if (toAgents.length !== 1) errors.push('owner_mode "single" requires exactly 1 to_agents entry');
+      } else if (mode === "shared") {
+        if (toAgents.length !== 2) {
+          errors.push('owner_mode "shared" requires exactly 2 to_agents entries');
+        }
+      } else if (mode === "auto") {
+        const caps = Array.isArray(handoff.required_capabilities) ? handoff.required_capabilities : [];
+        if (caps.length === 0) {
+          errors.push('owner_mode "auto" requires at least one required_capabilities entry');
+        }
+      } else if (mode !== "") {
+        errors.push(`owner_mode must be "single", "shared", or "auto" (got "${mode}")`);
+      }
+      if (handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== void 0) {
+        if (typeof handoff.no_handoff_reason !== "string" || !handoff.no_handoff_reason.trim()) {
+          errors.push("no_handoff_reason must be a non-empty string when provided");
+        } else {
+          if (mode !== "auto") {
+            errors.push('skip/no_handoff records must use owner_mode "auto"');
+          }
+          if (toAgents.length > 0) {
+            errors.push("skip/no_handoff records must not set to_agents");
+          }
+        }
+      }
+      if (!handoff.created_at) {
+        errors.push("created_at is required");
+      } else if (typeof handoff.created_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(handoff.created_at)) {
+        errors.push("created_at must be an ISO 8601 timestamp");
+      }
+      return { valid: errors.length === 0, errors };
+    }
+    function normalizeHandoffStatus2(status, fallback = "queued") {
+      const normalized = String(status || "").toLowerCase().trim();
+      if (HANDOFF_ALLOWED_STATUSES.has(normalized)) return normalized;
+      return fallback;
+    }
+    function buildHandoffId2(handoffs, now) {
+      const dateStr = now.slice(0, 10).replace(/-/g, "");
+      const existing = new Set((handoffs || []).map((h) => toSingleLine2(h?.handoff_id)));
+      let seq = Math.max(1, (handoffs || []).length + 1);
+      while (seq < 1e4) {
+        const id = `HO-${dateStr}-${String(seq).padStart(3, "0")}`;
+        if (!existing.has(id)) return id;
+        seq += 1;
+      }
+      return `HO-${dateStr}-${Date.now().toString().slice(-6)}`;
+    }
+    function createHandoffRecord2(workspaceFolder, input = {}) {
+      const store = readHandoffs2(workspaceFolder);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const fromAgent = canonicalAgentId2(input.from_agent || input.agent || "agency");
+      const toAgents = Array.isArray(input.to_agents) ? input.to_agents.map((a) => canonicalAgentId2(a)).filter(Boolean) : [];
+      const requiredCaps = Array.isArray(input.required_capabilities) ? input.required_capabilities.map((c) => toSingleLine2(c)).filter(Boolean) : [];
+      const skipReason = input.no_handoff_reason !== null && input.no_handoff_reason !== void 0 ? toSingleLine2(input.no_handoff_reason) : null;
+      const modeInput = String(input.owner_mode || "").toLowerCase();
+      let ownerMode = modeInput;
+      if (!ownerMode) {
+        ownerMode = toAgents.length >= 2 ? "shared" : toAgents.length === 1 ? "single" : "auto";
+      }
+      const record = {
+        handoff_id: toSingleLine2(input.handoff_id) || buildHandoffId2(store.handoffs, now),
+        task_id: toSingleLine2(input.task_id) || null,
+        from_agent: fromAgent || "agency",
+        to_agents: toAgents,
+        owner_mode: ownerMode,
+        status: normalizeHandoffStatus2(input.status, "queued"),
+        required_capabilities: requiredCaps,
+        summary: toSingleLine2(input.summary) || (skipReason ? "Handoff skipped by agent" : "Agency handoff"),
+        notes: toSingleLine2(input.notes || ""),
+        no_handoff_reason: skipReason || null,
+        files: Array.isArray(input.files) ? input.files.map((f) => toSingleLine2(f)).filter(Boolean) : [],
+        branch: toSingleLine2(input.branch) || null,
+        commit: toSingleLine2(input.commit) || null,
+        prior_attempts: Number.isFinite(Number(input.prior_attempts)) ? Math.max(0, Math.round(Number(input.prior_attempts))) : 0,
+        recommended_model_tier: input.recommended_model_tier === "lead" || input.recommended_model_tier === "worker" ? input.recommended_model_tier : null,
+        model_justification: toSingleLine2(input.model_justification) || null,
+        context_hints: input.context_hints && typeof input.context_hints === "object" ? input.context_hints : null,
+        source_system: toSingleLine2(input.source_system) || null,
+        source_run_id: toSingleLine2(input.source_run_id) || null,
+        source_event_id: toSingleLine2(input.source_event_id) || null,
+        created_at: now,
+        updated_at: now,
+        state_history: [
+          {
+            status: normalizeHandoffStatus2(input.status, "queued"),
+            agent: fromAgent || "agency",
+            timestamp: now,
+            reason: skipReason ? "created (skip)" : "created"
+          }
+        ]
+      };
+      if (skipReason) {
+        record.owner_mode = "auto";
+        record.to_agents = [];
+        if (!record.required_capabilities.length) {
+          record.required_capabilities = ["skip-handoff"];
+        }
+      } else if (record.owner_mode === "single" && record.to_agents.length !== 1) {
+        record.owner_mode = "auto";
+        record.to_agents = [];
+        if (record.required_capabilities.length === 0) record.required_capabilities = ["handoff"];
+      } else if (record.owner_mode === "shared" && record.to_agents.length !== 2) {
+        record.owner_mode = "auto";
+        record.to_agents = [];
+        if (record.required_capabilities.length === 0) record.required_capabilities = ["handoff"];
+      } else if (record.owner_mode === "auto" && record.required_capabilities.length === 0) {
+        record.required_capabilities = ["handoff"];
+      }
+      const { valid, errors } = validateHandoff2(record);
+      if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
+      writeHandoffs2(workspaceFolder, { version: 1, handoffs: [...store.handoffs, record] });
+      syncTrackerHandoffsSection2(workspaceFolder);
+      return record;
+    }
+    function completeHandoffRecord2(workspaceFolder, handoffId, status, agentId, reason = null) {
+      const normalizedId = toSingleLine2(handoffId);
+      const nextStatus = normalizeHandoffStatus2(status, "merged");
+      const actor = canonicalAgentId2(agentId);
+      if (!normalizedId) return { ok: false, reason: "missing_handoff_id" };
+      if (!actor) return { ok: false, reason: "missing_agent" };
+      const store = readHandoffs2(workspaceFolder);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      let found = false;
+      const updated = store.handoffs.map((h) => {
+        if (toSingleLine2(h?.handoff_id) !== normalizedId) return h;
+        found = true;
+        return {
+          ...h,
+          status: nextStatus,
+          updated_at: now,
+          state_history: [
+            ...Array.isArray(h.state_history) ? h.state_history : [],
+            {
+              status: nextStatus,
+              agent: actor,
+              timestamp: now,
+              reason: toSingleLine2(reason) || "completed via agentsync"
+            }
+          ]
+        };
+      });
+      if (!found) return { ok: false, reason: "not_found" };
+      const completedRecord = updated.find((h) => toSingleLine2(h?.handoff_id) === normalizedId);
+      if (completedRecord) {
+        const validation = validateHandoff2(completedRecord);
+        if (!validation.valid) {
+          return { ok: false, reason: "invalid_handoff", errors: validation.errors };
+        }
+      }
+      writeHandoffs2(workspaceFolder, { version: 1, handoffs: updated });
+      syncTrackerHandoffsSection2(workspaceFolder);
+      advanceChainOnCompletion(workspaceFolder, normalizedId);
+      return { ok: true, handoffId: normalizedId, status: nextStatus };
+    }
+    function advanceChainOnCompletion(workspaceFolder, completedHandoffId) {
+      const store = readHandoffs2(workspaceFolder);
+      const completed = store.handoffs.find(
+        (h) => toSingleLine2(h?.handoff_id) === toSingleLine2(completedHandoffId)
+      );
+      if (!completed || !completed.chain_id) return;
+      const completedStatus = String(completed.status || "").toLowerCase();
+      const isTerminal = completedStatus === "merged" || completedStatus === "approved" || completedStatus === "ready_for_review";
+      if (!isTerminal) return;
+      const nextStep = completed.chain_step + 1;
+      const nextHandoff = store.handoffs.find(
+        (h) => h.chain_id === completed.chain_id && h.chain_step === nextStep && String(h.status || "").toLowerCase() === "blocked"
+      );
+      if (!nextHandoff) return;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      nextHandoff.status = "queued";
+      nextHandoff.updated_at = now;
+      nextHandoff.notes = (nextHandoff.notes || "") + " | Previous step completed: " + toSingleLine2(completed.summary || "");
+      if (!Array.isArray(nextHandoff.state_history)) nextHandoff.state_history = [];
+      nextHandoff.state_history.push({
+        status: "queued",
+        agent: "system",
+        timestamp: now,
+        reason: "chain auto-advance from " + completedHandoffId
+      });
+      writeHandoffs2(workspaceFolder, { version: 1, handoffs: store.handoffs });
+      syncTrackerHandoffsSection2(workspaceFolder);
+    }
+    function claimHandoffRecord2(workspaceFolder, handoffId, agentId) {
+      const store = readHandoffs2(workspaceFolder);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const normalizedId = toSingleLine2(handoffId);
+      const canonical = canonicalAgentId2(agentId);
+      if (!normalizedId) return { ok: false, success: false, reason: "missing_handoff_id" };
+      if (!canonical) return { ok: false, success: false, reason: "missing_agent" };
+      let result = { ok: false, success: false, reason: "not_found" };
+      const updated = store.handoffs.map((handoff) => {
+        if (toSingleLine2(handoff?.handoff_id) !== normalizedId) return handoff;
+        const currentStatus = String(handoff?.status || "").toLowerCase();
+        const owners = getHandoffOwners2(handoff);
+        const lastClaim = Array.isArray(handoff?.state_history) && handoff.state_history.length > 0 ? handoff.state_history[handoff.state_history.length - 1] : null;
+        const claimedBy = lastClaim?.agent ? canonicalAgentId2(lastClaim.agent) : null;
+        if (currentStatus === "in_progress") {
+          result = { ok: false, success: false, reason: "already_claimed", claimedBy };
+          return handoff;
+        }
+        if (currentStatus !== "queued") {
+          result = {
+            ok: false,
+            success: false,
+            reason: "not_claimable",
+            status: currentStatus || "unknown"
+          };
+          return handoff;
+        }
+        if (owners.length > 0 && !owners.includes(canonical)) {
+          result = { ok: false, success: false, reason: "not_assigned" };
+          return handoff;
+        }
+        result = { ok: true, success: true, handoffId: normalizedId };
+        return {
+          ...handoff,
+          status: "in_progress",
+          updated_at: now,
+          state_history: [
+            ...Array.isArray(handoff.state_history) ? handoff.state_history : [],
+            {
+              status: "in_progress",
+              agent: canonical,
+              timestamp: now,
+              reason: "claimed via agentsync"
+            }
+          ]
+        };
+      });
+      if (!result.ok) return result;
+      const claimedRecord = updated.find((handoff) => toSingleLine2(handoff?.handoff_id) === normalizedId);
+      if (claimedRecord) {
+        const validation = validateHandoff2(claimedRecord);
+        if (!validation.valid) {
+          return { ok: false, success: false, reason: "invalid_handoff", errors: validation.errors };
+        }
+      }
+      writeHandoffs2(workspaceFolder, { version: 1, handoffs: updated });
+      return result;
+    }
+    function syncTrackerHandoffsSection2(workspaceFolder) {
+      const content = readTracker2(workspaceFolder);
+      if (!content) return;
+      const { handoffs } = readHandoffs2(workspaceFolder);
+      const updated = setSectionBody2(
+        content,
+        "Agent Handoffs",
+        renderTrackerHandoffsSection(handoffs)
+      );
+      writeTracker(workspaceFolder, updated);
+    }
+    function renderTrackerHandoffsSection(handoffs) {
+      const open = handoffs.filter(isOpenHandoff);
+      if (open.length === 0) return "No open handoffs.";
+      const lines = [];
+      for (const h of open) {
+        const id = String(h.handoff_id || h.task_id || "unknown");
+        const from = String(h.from_agent || "unknown");
+        const to = Array.isArray(h.to_agents) && h.to_agents.length > 0 ? h.to_agents.join(",") : "(none)";
+        const mode = String(h.owner_mode || "unknown");
+        const status = String(h.status || "queued");
+        lines.push(`- [ ] ${id} | from: ${from} | to: ${to} | mode: ${mode} | status: ${status}`);
+        const taskParts = [];
+        if (h.task_id) taskParts.push(`task: ${h.task_id}`);
+        const files = Array.isArray(h.files) ? h.files : [];
+        if (files.length > 0) taskParts.push(`files: ${files.map((f) => `\`${f}\``).join(", ")}`);
+        if (taskParts.length > 0) lines.push(`  - ${taskParts.join(" | ")}`);
+        if (h.notes && h.notes.trim()) lines.push(`  - note: ${h.notes.trim()}`);
+      }
+      return lines.join("\n");
+    }
+    function listHandoffRecords2(workspaceFolder) {
+      const store = readHandoffs2(workspaceFolder);
+      return store.handoffs;
+    }
+    function getHandoffOwners2(handoff) {
+      const owners = Array.isArray(handoff?.to_agents) ? handoff.to_agents.map((agent) => canonicalAgentId2(agent)).filter(Boolean) : [];
+      const personalityId = canonicalAgentId2(
+        handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+      );
+      const isLegacyPipelineAssignment = Boolean(handoff?.chain_id) && Boolean(personalityId) && owners.length === 1 && owners[0] === personalityId;
+      if (isLegacyPipelineAssignment) return [];
+      return owners;
+    }
+    function isProviderFlexHandoff(handoff) {
+      return getHandoffOwners2(handoff).length === 0;
+    }
+    function getHandoffPersonalityId(handoff) {
+      return canonicalAgentId2(
+        handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+      );
+    }
+    function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
+      const now = Date.now();
+      const staleMs = staleAfterHours * 60 * 60 * 1e3;
+      const isMine = (h) => {
+        const owners = getHandoffOwners2(h);
+        return owners.includes(currentAgentId);
+      };
+      const isStale = (h) => {
+        const stamp = h?.updated_at || h?.created_at;
+        if (!stamp) return false;
+        const parsed = Date.parse(stamp);
+        if (!Number.isFinite(parsed)) return false;
+        return now - parsed > staleMs;
+      };
+      const open = handoffs.filter(isOpenHandoff);
+      const assignedToMe = open.filter(
+        (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "single"
+      );
+      const sharedWithMe = open.filter(
+        (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "shared"
+      );
+      const runnable = open.filter((h) => {
+        if (String(h?.status || "").toLowerCase() !== "queued") return false;
+        return isProviderFlexHandoff(h) || !currentAgentId || isMine(h);
+      });
+      const blockedOrStale = open.filter(
+        (h) => String(h?.status || "").toLowerCase() === "blocked" || isStale(h)
+      );
+      return { open, assignedToMe, sharedWithMe, blockedOrStale, runnable };
+    }
+    function listRunnableQueuedHandoffs2(workspaceFolder, currentAgentId, staleHours = 24) {
+      const { handoffs } = readHandoffs2(workspaceFolder);
+      if (!Array.isArray(handoffs)) return [];
+      const buckets = getHandoffBuckets(handoffs, currentAgentId, staleHours);
+      return buckets.runnable;
+    }
+    module2.exports = {
+      isOpenHandoff,
+      validateHandoff: validateHandoff2,
+      normalizeHandoffStatus: normalizeHandoffStatus2,
+      buildHandoffId: buildHandoffId2,
+      createHandoffRecord: createHandoffRecord2,
+      completeHandoffRecord: completeHandoffRecord2,
+      claimHandoffRecord: claimHandoffRecord2,
+      advanceChainOnCompletion,
+      syncTrackerHandoffsSection: syncTrackerHandoffsSection2,
+      renderTrackerHandoffsSection,
+      listHandoffRecords: listHandoffRecords2,
+      getHandoffOwners: getHandoffOwners2,
+      isProviderFlexHandoff,
+      getHandoffPersonalityId,
+      getHandoffBuckets,
+      listRunnableQueuedHandoffs: listRunnableQueuedHandoffs2
+    };
+  }
+});
+
+// src/utils/health.js
+var require_health = __commonJS({
+  "src/utils/health.js"(exports2, module2) {
+    "use strict";
+    var cp = require("child_process");
+    var os = require("os");
+    var { readAgentSyncConfig: readAgentSyncConfig2 } = require_workspace();
+    var { parseCommandArgv: parseCommandArgv2 } = require_io();
+    function runCheckCommand(workspaceFolder, command) {
+      if (!command || !command.trim()) return Promise.resolve({ ok: false, output: "" });
+      const argv = parseCommandArgv2(command.trim());
+      if (argv.length === 0) return Promise.resolve({ ok: false, output: "" });
+      const [program, ...args] = argv;
+      const resolvedProgram = resolveHealthCheckProgram2(program);
+      return new Promise((resolve) => {
+        let stdout = "";
+        let stderr = "";
+        const proc = cp.spawn(resolvedProgram, args, { cwd: workspaceFolder.uri.fsPath });
+        proc.stdout.on("data", (data) => stdout += data.toString());
+        proc.stderr.on("data", (data) => stderr += data.toString());
+        const timeoutId = setTimeout(() => {
+          proc.kill();
+          resolve({ ok: false, output: "Command timed out after 60s." });
+        }, 6e4);
+        proc.on("close", (code) => {
+          clearTimeout(timeoutId);
+          resolve({ ok: code === 0, output: (stdout + stderr).trim() });
+        });
+        proc.on("error", (err) => {
+          clearTimeout(timeoutId);
+          resolve({ ok: false, output: `Process error: ${err.message}` });
+        });
+      });
+    }
+    function resolveHealthCheckProgram2(program, platform = os.platform()) {
+      const normalized = String(program || "").trim();
+      if (!normalized || platform !== "win32") return normalized;
+      if (/\.(cmd|exe|bat)$/i.test(normalized)) return normalized;
+      const shimCommands = /* @__PURE__ */ new Set(["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "corepack"]);
+      return shimCommands.has(normalized.toLowerCase()) ? `${normalized}.cmd` : normalized;
+    }
+    async function runHealthChecks2(workspaceFolder) {
+      const config = readAgentSyncConfig2(workspaceFolder);
+      const commandMap = {
+        Build: config.commands?.build,
+        Tests: config.commands?.test || config.commands?.tests,
+        Deploy: config.commands?.deploy
+      };
+      const results = {};
+      const outputs = {};
+      for (const [label, command] of Object.entries(commandMap)) {
+        if (!command || !String(command).trim()) {
+          results[label] = "Not configured";
+          outputs[label] = "";
+          continue;
+        }
+        const { ok, output } = await runCheckCommand(workspaceFolder, String(command));
+        results[label] = ok ? "Pass" : "Fail";
+        outputs[label] = output;
+      }
+      return { results, outputs };
+    }
+    function formatHealthTable(health, outputs = {}) {
+      const rows = [
+        "| Check  | Status |",
+        "| ------ | ------ |",
+        `| Build  | ${health.Build} |`,
+        `| Tests  | ${health.Tests} |`,
+        `| Deploy | ${health.Deploy} |`
+      ];
+      const failures = Object.entries(health).filter(([, status]) => status === "Fail");
+      for (const [label] of failures) {
+        const output = (outputs[label] || "").trim();
+        if (output) {
+          const trimmed = output.split("\n").slice(-20).join("\n");
+          rows.push("", `**${label} output:**`, "```", trimmed, "```");
+        }
+      }
+      return rows.join("\n");
+    }
+    module2.exports = {
+      runHealthChecks: runHealthChecks2,
+      formatHealthTable,
+      runCheckCommand,
+      resolveHealthCheckProgram: resolveHealthCheckProgram2
+    };
+  }
+});
+
+// src/session/providers.js
+var require_providers = __commonJS({
+  "src/session/providers.js"(exports2, module2) {
+    "use strict";
+    var { canonicalAgentId: canonicalAgentId2 } = require_utils();
+    var EXECUTION_PROVIDER_DEFS2 = Object.freeze([
+      { id: "claude", label: "Claude" },
+      { id: "codex", label: "Codex" },
+      { id: "gemini", label: "Gemini" },
+      { id: "copilot", label: "Copilot" }
+    ]);
+    var EXECUTION_PROVIDER_BY_ID2 = Object.freeze(
+      Object.fromEntries(EXECUTION_PROVIDER_DEFS2.map((provider) => [provider.id, provider]))
+    );
+    function getExecutionProvider2(value) {
+      const norm = String(value || "").trim().toLowerCase();
+      if (!norm) return null;
+      const byId = EXECUTION_PROVIDER_BY_ID2[norm];
+      if (byId) return byId;
+      return EXECUTION_PROVIDER_DEFS2.find((p) => p.label.toLowerCase() === norm) || null;
+    }
+    function getExecutionProviderId2(value) {
+      return getExecutionProvider2(value)?.id || null;
+    }
+    function getExecutionProviderLabel2(value) {
+      return getExecutionProvider2(value)?.label || null;
+    }
+    function getSessionProviderInfo2(session, fallback = null) {
+      const providerId = canonicalAgentId2(session?.provider_id || "") || getExecutionProviderId2(session?.provider_label || "") || getExecutionProviderId2(session?.agent || "") || getExecutionProviderId2(fallback);
+      const providerLabel = getExecutionProviderLabel2(session?.provider_label || "") || getExecutionProviderLabel2(session?.agent || "") || getExecutionProviderLabel2(fallback) || "Unknown";
+      return { id: providerId, label: providerLabel };
+    }
+    module2.exports = {
+      EXECUTION_PROVIDER_DEFS: EXECUTION_PROVIDER_DEFS2,
+      EXECUTION_PROVIDER_BY_ID: EXECUTION_PROVIDER_BY_ID2,
+      getExecutionProvider: getExecutionProvider2,
+      getExecutionProviderId: getExecutionProviderId2,
+      getExecutionProviderLabel: getExecutionProviderLabel2,
+      getSessionProviderInfo: getSessionProviderInfo2
+    };
+  }
+});
+
+// src/session/personalities.js
+var require_personalities = __commonJS({
+  "src/session/personalities.js"(exports2, module2) {
+    "use strict";
+    var { canonicalAgentId: canonicalAgentId2 } = require_text();
+    var { getAgentCatalog: getAgentCatalog2 } = require_agentCatalog();
+    function getPersonalityDisplayName2(workspaceFolder, personalityId) {
+      const normalized = canonicalAgentId2(personalityId);
+      if (!normalized) return null;
+      try {
+        const catalog = getAgentCatalog2(workspaceFolder);
+        const match = catalog?.agents?.find((agent) => canonicalAgentId2(agent.id) === normalized);
+        return match?.name || null;
+      } catch {
+        return null;
+      }
+    }
+    function getSessionPersonalityInfo2(workspaceFolder, session) {
+      const personalityId = canonicalAgentId2(session?.personality_id || "") || canonicalAgentId2(session?.agent_personality_id || "") || null;
+      const personalityName = String(session?.personality_name || "").trim() || getPersonalityDisplayName2(workspaceFolder, personalityId) || "None";
+      return { id: personalityId, name: personalityName };
+    }
+    module2.exports = {
+      getPersonalityDisplayName: getPersonalityDisplayName2,
+      getSessionPersonalityInfo: getSessionPersonalityInfo2
+    };
+  }
+});
+
+// src/utils/session.js
+var require_session = __commonJS({
+  "src/utils/session.js"(exports2, module2) {
+    "use strict";
+    var { canonicalAgentId: canonicalAgentId2 } = require_text();
+    var { getExecutionProviderId: getExecutionProviderId2, getExecutionProviderLabel: getExecutionProviderLabel2 } = require_providers();
+    var { getPersonalityDisplayName: getPersonalityDisplayName2 } = require_personalities();
+    function buildSessionIdentity2(workspaceFolder, providerLabel, options = {}) {
+      const providerId = getExecutionProviderId2(options.providerId || providerLabel);
+      const providerDisplay = getExecutionProviderLabel2(options.providerLabel || providerLabel) || "Unknown";
+      const personalityId = canonicalAgentId2(options.personalityId || "");
+      const personalityName = String(options.personalityName || "").trim() || getPersonalityDisplayName2(workspaceFolder, personalityId) || null;
+      return {
+        provider_id: providerId,
+        provider_label: providerDisplay,
+        personality_id: personalityId,
+        personality_name: personalityName,
+        // Legacy field retained for backward-compatible readers.
+        agent: providerDisplay
+      };
+    }
+    function detectWorkspaceHealth(config) {
+      return {
+        Build: config.commands?.build ? "Pending" : "Not configured",
+        Tests: config.commands?.test || config.commands?.tests ? "Pending" : "Not configured",
+        Deploy: config.commands?.deploy ? "Pending" : "Not configured"
+      };
+    }
+    module2.exports = {
+      buildSessionIdentity: buildSessionIdentity2,
+      detectWorkspaceHealth
+    };
+  }
+});
+
+// src/utils/automation.js
+var require_automation = __commonJS({
+  "src/utils/automation.js"(exports2, module2) {
+    "use strict";
+    var { PLACEHOLDER: PLACEHOLDER2, DEFAULT_HANDOFF_ROUTING_DEFAULTS } = require_constants();
+    var { toSingleLine: toSingleLine2, canonicalAgentId: canonicalAgentId2 } = require_text();
+    function summarizeHealthCounts(health) {
+      const counts = { pass: 0, fail: 0, notConfigured: 0, total: 0 };
+      for (const status of Object.values(health || {})) {
+        const normalized = toSingleLine2(status).toLowerCase();
+        if (normalized === "pass") counts.pass += 1;
+        else if (normalized === "fail") counts.fail += 1;
+        else counts.notConfigured += 1;
+        counts.total += 1;
+      }
+      return counts;
+    }
+    function buildDeterministicSessionSummary2({ goal, hotFiles, health, maxSummaryLength }) {
+      const normalizedGoal = toSingleLine2(goal) || "session update";
+      const filePart = hotFiles.length > 0 ? `mod ${hotFiles.length} files` : "no file changes";
+      const passCount = Object.values(health).filter((status) => status === "Pass").length;
+      const failCount = Object.values(health).filter((status) => status === "Fail").length;
+      const healthPart = failCount > 0 ? `(${failCount} fails)` : `(${passCount} pass)`;
+      const summary = `Goal: ${normalizedGoal} | ${filePart} | health: ${healthPart}`;
+      if (maxSummaryLength && summary.length > maxSummaryLength) {
+        return summary.slice(0, maxSummaryLength - 3) + "...";
+      }
+      return summary;
+    }
+    function resolveAutomationRoute2(config, sourceAgentLabel) {
+      const agentId = canonicalAgentId2(sourceAgentLabel);
+      if (!agentId) return null;
+      const route = config?.automation?.handoffRoutingDefaults?.[agentId];
+      const candidate = route && typeof route === "object" ? route : DEFAULT_HANDOFF_ROUTING_DEFAULTS[agentId];
+      if (!candidate || typeof candidate !== "object") return null;
+      const ownerMode = String(candidate.owner_mode || "").toLowerCase();
+      const toAgents = Array.isArray(candidate.to_agents) ? candidate.to_agents.map((agent) => canonicalAgentId2(agent)).filter(Boolean) : [];
+      const requiredCapabilities = Array.isArray(candidate.required_capabilities) ? candidate.required_capabilities.map((cap) => toSingleLine2(cap)).filter(Boolean) : [];
+      if (ownerMode === "single" && toAgents.length === 1) {
+        return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
+      }
+      if (ownerMode === "shared" && toAgents.length === 2) {
+        return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
+      }
+      if (ownerMode === "auto" && requiredCapabilities.length > 0) {
+        return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities };
+      }
+      return null;
+    }
+    function buildAutomationHandoffNotes2({ summary, hotFiles, health, sourceAgent }) {
+      const normalizedSummary = toSingleLine2(summary);
+      const normalizedSourceAgent = canonicalAgentId2(sourceAgent) || "unknown";
+      const topFiles = Array.isArray(hotFiles) ? hotFiles.slice(0, 2).join(", ") || "none" : "none";
+      const healthCounts = summarizeHealthCounts(health || {});
+      return toSingleLine2(
+        `Auto-drafted from ${normalizedSourceAgent}. Goal: ${normalizedSummary}. Start with files: ${topFiles}. Health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}.`
+      );
+    }
+    function buildHandoffPromptLines(handoffRecord) {
+      if (!handoffRecord || handoffRecord.no_handoff_reason) return [];
+      const handoffId = toSingleLine2(handoffRecord.handoff_id) || "HO-UNKNOWN";
+      const branch = toSingleLine2(handoffRecord.branch) || PLACEHOLDER2;
+      const commit = toSingleLine2(handoffRecord.commit) || PLACEHOLDER2;
+      const files = Array.isArray(handoffRecord.files) ? handoffRecord.files.filter(Boolean) : [];
+      const startFiles = files.slice(0, 2).join(", ") || "AgentTracker.md";
+      const summary = toSingleLine2(handoffRecord.summary) || "continue the current work";
+      const mode = String(handoffRecord.owner_mode || "").toLowerCase();
+      const modelTier = handoffRecord.recommended_model_tier || null;
+      const modelJustification = toSingleLine2(handoffRecord.model_justification || "");
+      let modelSuffix = "";
+      if (modelTier === "worker") {
+        modelSuffix = " [Worker-tier task: use a lighter model]";
+      } else if (modelTier === "lead") {
+        modelSuffix = " [Lead-tier task: use a capable model";
+        if (modelJustification) modelSuffix += " - " + modelJustification;
+        modelSuffix += "]";
+      }
+      const hints = handoffRecord.context_hints || null;
+      let contextSuffix = "";
+      if (hints) {
+        const parts = [];
+        if (Array.isArray(hints.entry_points) && hints.entry_points.length > 0) {
+          parts.push("entry points: " + hints.entry_points.slice(0, 3).join(", "));
+        }
+        if (Array.isArray(hints.relevant_symbols) && hints.relevant_symbols.length > 0) {
+          parts.push("key symbols: " + hints.relevant_symbols.slice(0, 5).join(", "));
+        }
+        if (parts.length > 0) contextSuffix = " Context: " + parts.join("; ") + ".";
+      }
+      const buildLine = (targetLabel) => `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json + .agentsync/context-capsule.json.${modelSuffix}${contextSuffix}`;
+      if (mode === "auto") {
+        const caps = Array.isArray(handoffRecord.required_capabilities) ? handoffRecord.required_capabilities.map((cap) => toSingleLine2(cap)).filter(Boolean) : [];
+        const capabilityLabel = caps.length > 0 ? `capabilities ${caps.join(", ")}` : "required capabilities";
+        return [buildLine(capabilityLabel)];
+      }
+      const targets = Array.isArray(handoffRecord.to_agents) ? handoffRecord.to_agents.map((agent) => canonicalAgentId2(agent)).filter(Boolean) : [];
+      if (targets.length === 0) return [buildLine("next owner")];
+      return targets.map((target) => buildLine(target));
+    }
+    module2.exports = {
+      buildDeterministicSessionSummary: buildDeterministicSessionSummary2,
+      resolveAutomationRoute: resolveAutomationRoute2,
+      buildAutomationHandoffNotes: buildAutomationHandoffNotes2,
+      buildHandoffPromptLines
+    };
+  }
+});
+
+// src/session/state.js
+var require_state = __commonJS({
+  "src/session/state.js"(exports2, module2) {
+    "use strict";
+    var {
+      OPEN_HANDOFF_STATUSES: OPEN_HANDOFF_STATUSES2,
+      canonicalAgentId: canonicalAgentId2,
+      parseISODate: parseISODate2,
+      formatElapsed: formatElapsed2
+    } = require_utils();
+    function getSessionStaleInfo2(state, autoStaleSessionMinutes = 0) {
+      if (!state?.sessionActive || !state?.activeSession?.startedAt) {
+        return { isStale: false, ageMs: null, thresholdMs: null };
+      }
+      if (!Number.isFinite(autoStaleSessionMinutes) || autoStaleSessionMinutes <= 0) {
+        return { isStale: false, ageMs: null, thresholdMs: null };
+      }
+      const started = parseISODate2(state.activeSession.startedAt);
+      if (!Number.isFinite(started)) {
+        return { isStale: false, ageMs: null, thresholdMs: autoStaleSessionMinutes * 60 * 1e3 };
+      }
+      const ageMs = Date.now() - started;
+      const thresholdMs = autoStaleSessionMinutes * 60 * 1e3;
+      return { isStale: ageMs >= thresholdMs, ageMs, thresholdMs };
+    }
+    function getOperationalState2(state, inProgressLines, handoffs, autoStaleSessionMinutes = 0) {
+      const staleInfo = getSessionStaleInfo2(state, autoStaleSessionMinutes);
+      if (state?.sessionActive) {
+        if (staleInfo.isStale) {
+          const ageLabel = staleInfo.ageMs != null ? formatElapsed2(staleInfo.ageMs) : "unknown duration";
+          return {
+            key: "waiting",
+            label: "Waiting",
+            reason: `Active session appears stale (running ${ageLabel}). End or clear it before new work.`
+          };
+        }
+        return {
+          key: "busy",
+          label: "Busy",
+          reason: 'An active session flag exists. If stale, use "Clear Active Session".'
+        };
+      }
+      const openHandoffs2 = handoffs.filter(
+        (h) => OPEN_HANDOFF_STATUSES2.has(String(h?.status || "").toLowerCase())
+      );
+      if (inProgressLines.length > 0 || openHandoffs2.length > 0) {
+        return {
+          key: "waiting",
+          label: "Waiting",
+          reason: "No active session, but pending work/handoffs exist."
+        };
+      }
+      return { key: "ready", label: "Ready", reason: "No active session and no pending queue." };
+    }
+    function getStatePulseFrame2(stateKey) {
+      const now = Math.floor(Date.now() / 700);
+      if (stateKey === "busy") {
+        const frames = ["[01]", "[10]", "[11]", "[00]"];
+        return frames[now % frames.length];
+      }
+      if (stateKey === "waiting") {
+        const frames = ["[.]", "[..]", "[...]"];
+        return frames[now % frames.length];
+      }
+      return "[idle]";
+    }
+    function isOpenHandoff(handoff) {
+      return OPEN_HANDOFF_STATUSES2.has(String(handoff?.status || "").toLowerCase());
+    }
+    function getHandoffOwners2(handoff) {
+      const owners = Array.isArray(handoff?.to_agents) ? handoff.to_agents.map((agent) => canonicalAgentId2(agent)).filter(Boolean) : [];
+      const personalityId = canonicalAgentId2(
+        handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+      );
+      const isLegacyPipelineAssignment = Boolean(handoff?.chain_id) && Boolean(personalityId) && owners.length === 1 && owners[0] === personalityId;
+      if (isLegacyPipelineAssignment) return [];
+      return owners;
+    }
+    function isProviderFlexHandoff(handoff) {
+      return getHandoffOwners2(handoff).length === 0;
+    }
+    function getHandoffPersonalityId(handoff) {
+      return canonicalAgentId2(
+        handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
+      );
+    }
+    function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
+      const now = Date.now();
+      const staleMs = staleAfterHours * 60 * 60 * 1e3;
+      const isMine = (h) => {
+        const owners = getHandoffOwners2(h);
+        return owners.includes(currentAgentId);
+      };
+      const isStale = (h) => {
+        const stamp = h?.updated_at || h?.created_at;
+        if (!stamp) return false;
+        const parsed = Date.parse(stamp);
+        if (!Number.isFinite(parsed)) return false;
+        return now - parsed > staleMs;
+      };
+      const open = handoffs.filter(isOpenHandoff);
+      const assignedToMe = open.filter(
+        (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "single"
+      );
+      const sharedWithMe = open.filter(
+        (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "shared"
+      );
+      const runnable = open.filter((h) => {
+        if (String(h?.status || "").toLowerCase() !== "queued") return false;
+        return isProviderFlexHandoff(h) || !currentAgentId || isMine(h);
+      });
+      const blockedOrStale = open.filter(
+        (h) => String(h?.status || "").toLowerCase() === "blocked" || isStale(h)
+      );
+      return { open, assignedToMe, sharedWithMe, blockedOrStale, runnable };
+    }
+    module2.exports = {
+      getSessionStaleInfo: getSessionStaleInfo2,
+      getOperationalState: getOperationalState2,
+      getStatePulseFrame: getStatePulseFrame2,
+      isOpenHandoff,
+      getHandoffOwners: getHandoffOwners2,
+      isProviderFlexHandoff,
+      getHandoffPersonalityId,
+      getHandoffBuckets
+    };
+  }
+});
+
+// src/utils/context.js
+var require_context = __commonJS({
+  "src/utils/context.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var { getHotFilesCached: getHotFilesCached2 } = require_git();
+    var { getAgentSyncDir: getAgentSyncDir2, getContextCapsulePath: getContextCapsulePath2 } = require_paths();
+    var { atomicWriteFileSync } = require_io();
+    var { getWorkspaceSnapshot: getWorkspaceSnapshot2, invalidateWorkspaceCaches: invalidateWorkspaceCaches2 } = require_workspaceSnapshot();
+    var { getTrackerWarnings: getTrackerWarnings2 } = require_trackerWarnings();
+    var { PLACEHOLDER: PLACEHOLDER2, DEFAULT_STALE_HOURS: DEFAULT_STALE_HOURS2 } = require_constants();
+    var { getSessionProviderInfo: getSessionProviderInfo2 } = require_providers();
+    var { getHandoffBuckets, getOperationalState: getOperationalState2 } = require_state();
+    function generateContextCapsule2(workspaceFolder) {
+      const snapshot = getWorkspaceSnapshot2(workspaceFolder, { force: true });
+      const state = snapshot.state || null;
+      const tracker = snapshot.tracker || {
+        agent: PLACEHOLDER2,
+        date: PLACEHOLDER2,
+        summary: PLACEHOLDER2,
+        branch: PLACEHOLDER2,
+        commit: PLACEHOLDER2
+      };
+      const handoffInfo = snapshot.handoffInfo || { handoffs: [] };
+      const config = snapshot.config || {};
+      const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS2;
+      const currentProviderId = getSessionProviderInfo2(
+        state?.activeSession || state?.lastSession || null,
+        tracker.agent
+      ).id;
+      const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProviderId, staleAfterHours);
+      const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
+      const opsState = getOperationalState2(
+        state,
+        snapshot.inProgressLines || [],
+        handoffInfo.handoffs || [],
+        autoStaleSessionMinutes
+      );
+      const hotFiles = getHotFilesCached2(workspaceFolder, { force: true });
+      const capsule = {
+        version: 1,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        workspace: workspaceFolder.name,
+        state: opsState,
+        session: {
+          active: Boolean(state?.sessionActive),
+          activeSession: state?.activeSession || null,
+          lastSession: state?.lastSession || null,
+          metrics: state?.sessionMetrics || null
+        },
+        tracker: {
+          agent: tracker.agent,
+          date: tracker.date,
+          summary: tracker.summary,
+          branch: tracker.branch,
+          commit: tracker.commit
+        },
+        hotFiles,
+        inProgress: snapshot.inProgressLines || [],
+        handoffs: {
+          openCount: handoffBuckets.open.length,
+          assignedToMe: handoffBuckets.assignedToMe.slice(0, 20),
+          sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 20),
+          blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 20)
+        },
+        warnings: getTrackerWarnings2(workspaceFolder, tracker)
+      };
+      fs2.mkdirSync(getAgentSyncDir2(workspaceFolder), { recursive: true });
+      atomicWriteFileSync(getContextCapsulePath2(workspaceFolder), JSON.stringify(capsule, null, 2));
+      invalidateWorkspaceCaches2(workspaceFolder);
+      return capsule;
+    }
+    module2.exports = { generateContextCapsule: generateContextCapsule2 };
   }
 });
 
@@ -1025,2314 +2264,686 @@ var require_utils = __commonJS({
       ...require_git(),
       ...require_workspace(),
       ...require_workspaceSnapshot(),
+      ...require_trackerWarnings(),
+      ...require_storage(),
       ...require_agentCatalog(),
-      ...require_executionChannels()
+      ...require_executionChannels(),
+      ...require_handoffs(),
+      ...require_health(),
+      ...require_session(),
+      ...require_automation(),
+      ...require_context()
     };
   }
 });
 
-// src/extension.js
-var vscode = require("vscode");
-var fs = require("fs");
-var path = require("path");
-var cp = require("child_process");
-var {
-  // constants
-  PLACEHOLDER,
-  DEFAULT_STALE_HOURS,
-  OPEN_HANDOFF_STATUSES,
-  DEFAULT_END_SESSION_ZERO_TOUCH,
-  DEFAULT_START_SESSION_ZERO_TOUCH,
-  DEFAULT_HANDOFF_ROUTING_DEFAULTS,
-  ROLE_LIST,
-  AGENT_CATEGORY_COLORS,
-  // paths
-  getTemplatesDir,
-  getTrackerPath,
-  getConfigPath,
-  getAgentSyncDir,
-  getStatePath,
-  getRequestPath,
-  getResultPath,
-  getHandoffsPath,
-  getContextCapsulePath,
-  // text
-  isEmptyValue,
-  escapeRegExp,
-  parseTracker,
-  getSectionBody,
-  setSectionBody,
-  canonicalAgentId,
-  toSingleLine,
-  truncateSingleLine,
-  formatElapsed,
-  // io
-  atomicWriteFileSync,
-  parseISODate,
-  parseCommandArgv,
-  createNonce,
-  // git
-  runGit,
-  runGitExitCode,
-  detectHotFiles,
-  normalizeRepoRelativePath,
-  scoreNextTaskCapabilities,
-  detectSignatureChanges,
-  // workspace
-  getActiveWorkspaceFolder,
-  resolveWorkspaceFolder,
-  getWorkspaceLabelPrefix,
-  // snapshot
-  WorkspaceSnapshotService,
-  // agent catalog
-  buildCatalog,
-  mapAgentToCapabilities,
-  matchAgentsByCapabilities,
-  // execution channels
-  assembleAgentPrompt,
-  deliverPrompt,
-  injectPersonalityToWorkspace,
-  removePersonalityFromWorkspace
-} = require_utils();
-var HOT_FILES_CACHE_TTL_MS = 4e3;
-var _hotFilesCache = /* @__PURE__ */ new Map();
-var _snapshotService = null;
-var _agentCatalog = null;
-var _extensionPath = null;
-var EXECUTION_PROVIDER_DEFS = Object.freeze([
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-  { id: "gemini", label: "Gemini" },
-  { id: "copilot", label: "Copilot" }
-]);
-var EXECUTION_PROVIDER_BY_ID = Object.freeze(
-  Object.fromEntries(EXECUTION_PROVIDER_DEFS.map((provider) => [provider.id, provider]))
-);
-function readAgentSyncConfig(workspaceFolder) {
-  const settings = vscode.workspace.getConfiguration("agentsync", workspaceFolder?.uri);
-  const settingsAutoStale = Number(settings.get("autoStaleSessionMinutes", 0));
-  const toNumber = (value, fallback) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-  const normalizeStartSessionAutomation = (value = {}) => ({
-    enabled: value.enabled === true,
-    autoClaimHandoff: value.autoClaimHandoff === true,
-    promptPreFill: value.promptPreFill === void 0 ? true : value.promptPreFill === true
-  });
-  const normalizeEndSessionAutomation = (value = {}) => {
-    const maxSummaryLength = Math.max(
-      60,
-      Math.min(
-        260,
-        Math.round(
-          toNumber(value.maxSummaryLength, DEFAULT_END_SESSION_ZERO_TOUCH.maxSummaryLength)
-        )
-      )
-    );
-    return {
-      enabled: value.enabled === true,
-      autonomy: String(value.autonomy || DEFAULT_END_SESSION_ZERO_TOUCH.autonomy).trim() || DEFAULT_END_SESSION_ZERO_TOUCH.autonomy,
-      copyPromptToClipboard: value.copyPromptToClipboard === void 0 ? DEFAULT_END_SESSION_ZERO_TOUCH.copyPromptToClipboard : value.copyPromptToClipboard === true,
-      maxSummaryLength
-    };
-  };
-  const normalizeRoute = (route = {}) => {
-    const ownerMode = String(route.owner_mode || "").toLowerCase();
-    const toAgents = Array.isArray(route.to_agents) ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean) : [];
-    const requiredCapabilities = Array.isArray(route.required_capabilities) ? route.required_capabilities.map((c) => String(c || "").trim()).filter(Boolean) : [];
-    if (ownerMode === "single" && toAgents.length === 1) {
-      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
-    }
-    if (ownerMode === "shared" && toAgents.length === 2) {
-      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
-    }
-    if (ownerMode === "auto" && requiredCapabilities.length > 0) {
-      return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities };
-    }
-    return null;
-  };
-  const defaultRoutes = Object.fromEntries(
-    Object.entries(DEFAULT_HANDOFF_ROUTING_DEFAULTS).map(([agentId, route]) => [
-      agentId,
-      { ...route }
-    ])
-  );
-  const normalizeAutomation = (automation = {}) => {
-    const endSessionZeroTouch = normalizeEndSessionAutomation(automation.endSessionZeroTouch || {});
-    const startSessionZeroTouch = normalizeStartSessionAutomation(
-      automation.startSessionZeroTouch || {}
-    );
-    const configured = automation.handoffRoutingDefaults || {};
-    const handoffRoutingDefaults = { ...defaultRoutes };
-    if (configured && typeof configured === "object") {
-      for (const [rawAgentId, route] of Object.entries(configured)) {
-        const agentId = canonicalAgentId(rawAgentId);
-        if (!agentId) continue;
-        const normalizedRoute = normalizeRoute(route);
-        if (normalizedRoute) handoffRoutingDefaults[agentId] = normalizedRoute;
-      }
-    }
-    return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults };
-  };
-  const DEFAULT_TOKEN_BUDGET = Object.freeze({
-    maxTokensDefault: 4e3,
-    batchSimilarTasks: true,
-    enableCaching: true,
-    sessionDurationWarningMinutes: 0
-  });
-  const normalizeTokenBudget = (value = {}) => ({
-    maxTokensDefault: toNumber(value.maxTokensDefault, DEFAULT_TOKEN_BUDGET.maxTokensDefault),
-    batchSimilarTasks: value.batchSimilarTasks === void 0 ? true : value.batchSimilarTasks === true,
-    enableCaching: value.enableCaching === void 0 ? true : value.enableCaching === true,
-    sessionDurationWarningMinutes: Math.max(
-      0,
-      Math.round(
-        toNumber(
-          value.sessionDurationWarningMinutes,
-          DEFAULT_TOKEN_BUDGET.sessionDurationWarningMinutes
-        )
-      )
-    )
-  });
-  const normalizeModelTiers = (value = {}) => {
-    const result = {};
-    for (const [tier, def] of Object.entries(value)) {
-      if (tier !== "worker" && tier !== "lead") continue;
-      result[tier] = {
-        models: Array.isArray(def?.models) ? def.models.map((m) => String(m).trim()).filter(Boolean) : [],
-        useCases: Array.isArray(def?.useCases) ? def.useCases.map((u) => String(u).trim()).filter(Boolean) : []
+// src/session/SessionManager.js
+var require_SessionManager = __commonJS({
+  "src/session/SessionManager.js"(exports2, module2) {
+    "use strict";
+    var {
+      readTracker: readTracker2,
+      writeTracker,
+      readStateFile: readStateFile2,
+      writeStateFile: writeStateFile2,
+      readHandoffs: readHandoffs2,
+      writeHandoffs: writeHandoffs2,
+      readAgentSyncConfig: readAgentSyncConfig2,
+      runGit: runGit2,
+      detectSignatureChanges,
+      scoreNextTaskCapabilities: scoreNextTaskCapabilities2,
+      PLACEHOLDER: PLACEHOLDER2,
+      DEFAULT_END_SESSION_ZERO_TOUCH: DEFAULT_END_SESSION_ZERO_TOUCH2,
+      getHotFilesCached: getHotFilesCached2,
+      toSingleLine: toSingleLine2,
+      parseISODate: parseISODate2,
+      isEmptyValue: isEmptyValue2,
+      parseTracker: parseTracker2,
+      getSectionBody: getSectionBody2,
+      setSectionBody: setSectionBody2,
+      canonicalAgentId: canonicalAgentId2,
+      getAgentCatalog: getAgentCatalog2,
+      matchAgentsByCapabilities: matchAgentsByCapabilities2,
+      buildHandoffPromptLines,
+      renderTrackerHandoffsSection,
+      removePersonalityFromWorkspace,
+      formatHealthTable,
+      isOpenHandoff,
+      buildSessionIdentity: buildSessionIdentity2,
+      validateHandoff: validateHandoff2,
+      runHealthChecks: runHealthChecks2,
+      buildDeterministicSessionSummary: buildDeterministicSessionSummary2,
+      resolveAutomationRoute: resolveAutomationRoute2,
+      buildAutomationHandoffNotes: buildAutomationHandoffNotes2
+    } = require_utils();
+    function startSessionCore(workspaceFolder, agent, goal, options = {}) {
+      const content = readTracker2(workspaceFolder);
+      if (!content) throw new Error("Could not read AgentTracker.md");
+      const existingTracker = parseTracker2(content);
+      const normalizedGoal = (goal || "").trim() || "Session started";
+      const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const sessionIdentity = buildSessionIdentity2(workspaceFolder, agent, options);
+      const entry = `- [ ] ${sessionIdentity.provider_label} (${startedAt}): ${normalizedGoal}`;
+      const currentBody = getSectionBody2(content, "In Progress");
+      const currentLines = currentBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line && line.toLowerCase() !== "*nothing active*");
+      const updatedBody = [...currentLines, entry].join("\n");
+      const updated = setSectionBody2(content, "In Progress", updatedBody || "*Nothing active*");
+      writeTracker(workspaceFolder, updated);
+      const existingState = readStateFile2(workspaceFolder) || {};
+      const lastSessionFromState = existingState.lastSession || null;
+      const lastSessionFromTracker = isEmptyValue2(existingTracker.agent) ? null : {
+        agent: existingTracker.agent,
+        date: existingTracker.date,
+        summary: existingTracker.summary,
+        branch: existingTracker.branch,
+        commit: existingTracker.commit
       };
-    }
-    return Object.keys(result).length > 0 ? result : null;
-  };
-  const defaults = {
-    staleAfterHours: DEFAULT_STALE_HOURS,
-    autoStaleSessionMinutes: Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0 ? settingsAutoStale : 0,
-    commands: {},
-    requireHandoffOnEndSession: false,
-    automation: normalizeAutomation({}),
-    modelTiers: null,
-    tokenBudget: normalizeTokenBudget({}),
-    userProfile: null,
-    dashboardShortcuts: null,
-    sessionDurationWarningMinutes: 0
-  };
-  const configPath = getConfigPath(workspaceFolder);
-  if (!fs.existsSync(configPath)) return defaults;
-  try {
-    const raw = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(raw);
-    const staleAfterHours = Number(parsed.staleAfterHours);
-    const autoStaleSessionMinutes = Number(parsed.autoStaleSessionMinutes);
-    return {
-      staleAfterHours: Number.isFinite(staleAfterHours) && staleAfterHours >= 0 ? staleAfterHours : DEFAULT_STALE_HOURS,
-      autoStaleSessionMinutes: Number.isFinite(autoStaleSessionMinutes) && autoStaleSessionMinutes >= 0 ? autoStaleSessionMinutes : 0,
-      commands: parsed.commands && typeof parsed.commands === "object" ? parsed.commands : {},
-      requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
-      automation: normalizeAutomation(parsed.automation || {}),
-      modelTiers: normalizeModelTiers(parsed.modelTiers || {}),
-      tokenBudget: normalizeTokenBudget(parsed.tokenBudget || {}),
-      userProfile: parsed.userProfile && typeof parsed.userProfile === "object" ? parsed.userProfile : null,
-      dashboardShortcuts: Array.isArray(parsed.dashboardShortcuts) ? parsed.dashboardShortcuts : null,
-      sessionDurationWarningMinutes: toNumber(parsed.sessionDurationWarningMinutes, 0)
-    };
-  } catch {
-    return defaults;
-  }
-}
-function writeConfigFile(workspaceFolder, data) {
-  const configPath = getConfigPath(workspaceFolder);
-  try {
-    atomicWriteFileSync(configPath, JSON.stringify(data, null, 2));
-    invalidateWorkspaceCaches(workspaceFolder);
-  } catch {
-  }
-}
-function readStateFile(workspaceFolder) {
-  const statePath = getStatePath(workspaceFolder);
-  if (!fs.existsSync(statePath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(statePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-function getWorkspaceSnapshotService() {
-  if (_snapshotService) return _snapshotService;
-  _snapshotService = new WorkspaceSnapshotService({
-    readTracker,
-    parseTracker,
-    readStateFile,
-    readConfig: readAgentSyncConfig,
-    readHandoffs,
-    getInProgressLines,
-    placeholder: PLACEHOLDER
-  });
-  return _snapshotService;
-}
-function getWorkspaceSnapshot(workspaceFolder, options = {}) {
-  return getWorkspaceSnapshotService().getSnapshot(workspaceFolder, options);
-}
-function invalidateWorkspaceCaches(workspaceFolder) {
-  if (!workspaceFolder) {
-    _hotFilesCache.clear();
-    getWorkspaceSnapshotService().invalidateAll();
-    return;
-  }
-  _hotFilesCache.delete(workspaceFolder.uri.fsPath);
-  getWorkspaceSnapshotService().invalidate(workspaceFolder);
-}
-function getHotFilesCached(workspaceFolder, options = {}) {
-  const { force = false } = options;
-  const key = workspaceFolder.uri.fsPath;
-  const cached = _hotFilesCache.get(key);
-  const now = Date.now();
-  if (!force && cached && now - cached.fetchedAt <= HOT_FILES_CACHE_TTL_MS && Array.isArray(cached.files)) {
-    return cached.files;
-  }
-  const files = detectHotFiles(workspaceFolder);
-  _hotFilesCache.set(key, { files, fetchedAt: now });
-  return files;
-}
-async function promptForRole(prefillRole) {
-  const picks = ROLE_LIST.map((r) => ({
-    label: r.replace(/_/g, " "),
-    description: "",
-    role: r
-  }));
-  if (prefillRole) {
-    const match = picks.find((p) => p.role === prefillRole);
-    if (match) return match.role;
-  }
-  const selected = await vscode.window.showQuickPick(picks, {
-    placeHolder: "Select your primary role for this project",
-    ignoreFocusOut: true
-  });
-  return selected?.role || null;
-}
-function applyRolePreset(workspaceFolder, role) {
-  if (!ROLE_LIST.includes(role)) return;
-  const root = workspaceFolder.uri.fsPath;
-  let preset = null;
-  try {
-    const rolesDir = path.join(__dirname, "templates", "roles");
-    const raw = fs.readFileSync(path.join(rolesDir, `${role}.json`), "utf8");
-    preset = JSON.parse(raw);
-  } catch {
-  }
-  if (!preset) return;
-  const cfg = readAgentSyncConfig(workspaceFolder);
-  cfg.userProfile = { role };
-  if (Array.isArray(preset.dashboardShortcuts)) {
-    cfg.dashboardShortcuts = preset.dashboardShortcuts;
-  }
-  if (typeof preset.sessionDurationWarningMinutes === "number") {
-    cfg.sessionDurationWarningMinutes = preset.sessionDurationWarningMinutes;
-  }
-  if (preset.handoffRoutingDefaults) {
-    cfg.automation = cfg.automation || {};
-    cfg.automation.handoffRoutingDefaults = preset.handoffRoutingDefaults;
-  }
-  writeConfigFile(workspaceFolder, cfg);
-  const appendBlock = (filePath, text) => {
-    let content = "";
-    try {
-      content = fs.readFileSync(filePath, "utf8");
-    } catch {
-    }
-    content = content.replace(/## Role:[\s\S]*?(?=\n## |$)/g, "");
-    content += "\n\n## Role: " + role.replace(/_/g, " ") + "\n\n" + text + "\n";
-    fs.writeFileSync(filePath, content, "utf8");
-  };
-  if (preset.agentInstructionBlock) {
-    appendBlock(path.join(root, "CLAUDE.md"), preset.agentInstructionBlock);
-    appendBlock(path.join(root, "AGENTS.md"), preset.agentInstructionBlock);
-    appendBlock(path.join(root, ".github", "copilot-instructions.md"), preset.agentInstructionBlock);
-  }
-}
-function getInProgressLines(trackerContent) {
-  if (!trackerContent) return [];
-  const body = getSectionBody(trackerContent, "In Progress");
-  return body.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && line !== "*Nothing active*" && !line.startsWith("<!--"));
-}
-function readHandoffs(workspaceFolder) {
-  const handoffsPath = getHandoffsPath(workspaceFolder);
-  if (!fs.existsSync(handoffsPath)) {
-    return { exists: false, handoffs: [], error: null };
-  }
-  try {
-    const raw = fs.readFileSync(handoffsPath, "utf8").replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(raw);
-    const handoffs = Array.isArray(parsed?.handoffs) ? parsed.handoffs : [];
-    return { exists: true, handoffs, error: null };
-  } catch (err) {
-    return {
-      exists: true,
-      handoffs: [],
-      error: err && err.message ? err.message : "Invalid JSON"
-    };
-  }
-}
-function ensureHandoffsFile(workspaceFolder) {
-  try {
-    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
-    const handoffsPath = getHandoffsPath(workspaceFolder);
-    if (!fs.existsSync(handoffsPath)) {
-      fs.writeFileSync(handoffsPath, JSON.stringify({ version: 1, handoffs: [] }, null, 2), "utf8");
-      invalidateWorkspaceCaches(workspaceFolder);
-    }
-  } catch (err) {
-    if (err && err.code !== "ENOENT") console.error("[AgentSync] ensureHandoffsFile error:", err);
-  }
-}
-function writeHandoffs(workspaceFolder, data) {
-  fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
-  const handoffsPath = getHandoffsPath(workspaceFolder);
-  atomicWriteFileSync(handoffsPath, JSON.stringify(data, null, 2));
-  invalidateWorkspaceCaches(workspaceFolder);
-}
-function validateHandoff(handoff) {
-  const errors = [];
-  const skipReason = handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== void 0 ? String(handoff.no_handoff_reason || "").trim() : null;
-  const isSkip = Boolean(skipReason);
-  if (!handoff.from_agent) errors.push("from_agent is required");
-  if (!handoff.summary && !isSkip) errors.push("summary is required");
-  if (!handoff.owner_mode) errors.push("owner_mode is required");
-  if (!handoff.status) errors.push("status is required");
-  const mode = String(handoff.owner_mode || "").toLowerCase();
-  const toAgents = Array.isArray(handoff.to_agents) ? handoff.to_agents : [];
-  if (mode === "single") {
-    if (toAgents.length !== 1) errors.push('owner_mode "single" requires exactly 1 to_agents entry');
-  } else if (mode === "shared") {
-    if (toAgents.length !== 2)
-      errors.push('owner_mode "shared" requires exactly 2 to_agents entries');
-  } else if (mode === "auto") {
-    const caps = Array.isArray(handoff.required_capabilities) ? handoff.required_capabilities : [];
-    if (caps.length === 0)
-      errors.push('owner_mode "auto" requires at least one required_capabilities entry');
-  } else if (mode !== "") {
-    errors.push(`owner_mode must be "single", "shared", or "auto" (got "${mode}")`);
-  }
-  if (handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== void 0) {
-    if (typeof handoff.no_handoff_reason !== "string" || !handoff.no_handoff_reason.trim()) {
-      errors.push("no_handoff_reason must be a non-empty string when provided");
-    } else {
-      if (mode !== "auto") {
-        errors.push('skip/no_handoff records must use owner_mode "auto"');
-      }
-      if (toAgents.length > 0) {
-        errors.push("skip/no_handoff records must not set to_agents");
-      }
-    }
-  }
-  if (!handoff.created_at) {
-    errors.push("created_at is required");
-  } else if (typeof handoff.created_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(handoff.created_at)) {
-    errors.push("created_at must be an ISO 8601 timestamp");
-  }
-  return { valid: errors.length === 0, errors };
-}
-function getSessionStaleInfo(state, autoStaleSessionMinutes = 0) {
-  if (!state?.sessionActive || !state?.activeSession?.startedAt) {
-    return { isStale: false, ageMs: null, thresholdMs: null };
-  }
-  if (!Number.isFinite(autoStaleSessionMinutes) || autoStaleSessionMinutes <= 0) {
-    return { isStale: false, ageMs: null, thresholdMs: null };
-  }
-  const started = parseISODate(state.activeSession.startedAt);
-  if (!Number.isFinite(started)) {
-    return { isStale: false, ageMs: null, thresholdMs: autoStaleSessionMinutes * 60 * 1e3 };
-  }
-  const ageMs = Date.now() - started;
-  const thresholdMs = autoStaleSessionMinutes * 60 * 1e3;
-  return { isStale: ageMs >= thresholdMs, ageMs, thresholdMs };
-}
-function getOperationalState(state, inProgressLines, handoffs, autoStaleSessionMinutes = 0) {
-  const staleInfo = getSessionStaleInfo(state, autoStaleSessionMinutes);
-  if (state?.sessionActive) {
-    if (staleInfo.isStale) {
-      const ageLabel = staleInfo.ageMs != null ? formatElapsed(staleInfo.ageMs) : "unknown duration";
-      return {
-        key: "waiting",
-        label: "Waiting",
-        reason: `Active session appears stale (running ${ageLabel}). End or clear it before new work.`
-      };
-    }
-    return {
-      key: "busy",
-      label: "Busy",
-      reason: 'An active session flag exists. If stale, use "Clear Active Session".'
-    };
-  }
-  const openHandoffs2 = handoffs.filter(
-    (h) => OPEN_HANDOFF_STATUSES.has(String(h?.status || "").toLowerCase())
-  );
-  if (inProgressLines.length > 0 || openHandoffs2.length > 0) {
-    return {
-      key: "waiting",
-      label: "Waiting",
-      reason: "No active session, but pending work/handoffs exist."
-    };
-  }
-  return { key: "ready", label: "Ready", reason: "No active session and no pending queue." };
-}
-function getStatePulseFrame(stateKey) {
-  const now = Math.floor(Date.now() / 700);
-  if (stateKey === "busy") {
-    const frames = ["[01]", "[10]", "[11]", "[00]"];
-    return frames[now % frames.length];
-  }
-  if (stateKey === "waiting") {
-    const frames = ["[.]", "[..]", "[...]"];
-    return frames[now % frames.length];
-  }
-  return "[idle]";
-}
-function isOpenHandoff(handoff) {
-  return OPEN_HANDOFF_STATUSES.has(String(handoff?.status || "").toLowerCase());
-}
-function getHandoffOwners(handoff) {
-  const owners = Array.isArray(handoff?.to_agents) ? handoff.to_agents.map((agent) => canonicalAgentId(agent)).filter(Boolean) : [];
-  const personalityId = canonicalAgentId(
-    handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
-  );
-  const isLegacyPipelineAssignment = Boolean(handoff?.chain_id) && Boolean(personalityId) && owners.length === 1 && owners[0] === personalityId;
-  if (isLegacyPipelineAssignment) return [];
-  return owners;
-}
-function isProviderFlexHandoff(handoff) {
-  return getHandoffOwners(handoff).length === 0;
-}
-function getHandoffPersonalityId(handoff) {
-  return canonicalAgentId(
-    handoff?.agent_personality_id || handoff?.suggested_agent_personality_id || ""
-  );
-}
-function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
-  const now = Date.now();
-  const staleMs = staleAfterHours * 60 * 60 * 1e3;
-  const isMine = (h) => {
-    const owners = getHandoffOwners(h);
-    return owners.includes(currentAgentId);
-  };
-  const isStale = (h) => {
-    const stamp = h?.updated_at || h?.created_at;
-    if (!stamp) return false;
-    const parsed = Date.parse(stamp);
-    if (!Number.isFinite(parsed)) return false;
-    return now - parsed > staleMs;
-  };
-  const open = handoffs.filter(isOpenHandoff);
-  const assignedToMe = open.filter(
-    (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "single"
-  );
-  const sharedWithMe = open.filter(
-    (h) => currentAgentId && isMine(h) && String(h?.owner_mode || "").toLowerCase() === "shared"
-  );
-  const runnable = open.filter((h) => {
-    if (String(h?.status || "").toLowerCase() !== "queued") return false;
-    return isProviderFlexHandoff(h) || !currentAgentId || isMine(h);
-  });
-  const blockedOrStale = open.filter(
-    (h) => String(h?.status || "").toLowerCase() === "blocked" || isStale(h)
-  );
-  return { open, assignedToMe, sharedWithMe, blockedOrStale, runnable };
-}
-function runCheckCommand(workspaceFolder, command) {
-  if (!command || !command.trim()) return Promise.resolve({ ok: false, output: "" });
-  const argv = parseCommandArgv(command.trim());
-  if (argv.length === 0) return Promise.resolve({ ok: false, output: "" });
-  const [program, ...args] = argv;
-  const resolvedProgram = resolveHealthCheckProgram(program);
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const proc = cp.spawn(resolvedProgram, args, { cwd: workspaceFolder.uri.fsPath });
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-      }
-      setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-        }
-      }, 2e3);
-      resolve({ ok: false, output: "Health check timed out (60s limit)." });
-    }, 60 * 1e3);
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    proc.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const output = [stdout, stderr].filter(Boolean).join("\n").trim();
-      resolve({ ok: code === 0, output });
-    });
-    proc.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ ok: false, output: err.message });
-    });
-  });
-}
-function resolveHealthCheckProgram(program, platform = process.platform) {
-  const normalized = String(program || "").trim();
-  if (!normalized || platform !== "win32") return normalized;
-  if (/\.(cmd|exe|bat)$/i.test(normalized)) return normalized;
-  const shimCommands = /* @__PURE__ */ new Set(["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "corepack"]);
-  return shimCommands.has(normalized.toLowerCase()) ? `${normalized}.cmd` : normalized;
-}
-async function runHealthChecks(workspaceFolder) {
-  const config = readAgentSyncConfig(workspaceFolder);
-  const commandMap = {
-    Build: config.commands?.build,
-    Tests: config.commands?.test || config.commands?.tests,
-    Deploy: config.commands?.deploy
-  };
-  const results = {};
-  const outputs = {};
-  for (const [label, command] of Object.entries(commandMap)) {
-    if (!command || !String(command).trim()) {
-      results[label] = "Not configured";
-      outputs[label] = "";
-      continue;
-    }
-    const { ok, output } = await runCheckCommand(workspaceFolder, String(command));
-    results[label] = ok ? "Pass" : "Fail";
-    outputs[label] = output;
-  }
-  return { results, outputs };
-}
-function formatHealthTable(health, outputs = {}) {
-  const rows = [
-    "| Check  | Status |",
-    "| ------ | ------ |",
-    `| Build  | ${health.Build} |`,
-    `| Tests  | ${health.Tests} |`,
-    `| Deploy | ${health.Deploy} |`
-  ];
-  const failures = Object.entries(health).filter(([, status]) => status === "Fail");
-  for (const [label] of failures) {
-    const output = (outputs[label] || "").trim();
-    if (output) {
-      const trimmed = output.split("\n").slice(-20).join("\n");
-      rows.push("", `**${label} output:**`, "```", trimmed, "```");
-    }
-  }
-  return rows.join("\n");
-}
-function renderTrackerHandoffsSection(handoffs) {
-  const open = handoffs.filter(isOpenHandoff);
-  if (open.length === 0) return "No open handoffs.";
-  const lines = [];
-  for (const h of open) {
-    const id = String(h.handoff_id || h.task_id || "unknown");
-    const from = String(h.from_agent || "unknown");
-    const to = Array.isArray(h.to_agents) && h.to_agents.length > 0 ? h.to_agents.join(",") : "(none)";
-    const mode = String(h.owner_mode || "unknown");
-    const status = String(h.status || "queued");
-    lines.push(`- [ ] ${id} | from: ${from} | to: ${to} | mode: ${mode} | status: ${status}`);
-    const taskParts = [];
-    if (h.task_id) taskParts.push(`task: ${h.task_id}`);
-    const files = Array.isArray(h.files) ? h.files : [];
-    if (files.length > 0) taskParts.push(`files: ${files.map((f) => `\`${f}\``).join(", ")}`);
-    if (taskParts.length > 0) lines.push(`  - ${taskParts.join(" | ")}`);
-    if (h.notes && h.notes.trim()) lines.push(`  - note: ${h.notes.trim()}`);
-  }
-  return lines.join("\n");
-}
-async function openTrackerDocument(workspaceFolder) {
-  const trackerPath = getTrackerPath(workspaceFolder);
-  const doc = await vscode.workspace.openTextDocument(trackerPath);
-  await vscode.window.showTextDocument(doc);
-}
-async function openAgentSyncDashboard() {
-  try {
-    await vscode.commands.executeCommand("agentsync.dashboard.focus");
-    return true;
-  } catch {
-  }
-  try {
-    await vscode.commands.executeCommand("workbench.view.extension.agentsync");
-    await vscode.commands.executeCommand("agentsync.dashboard.focus");
-    return true;
-  } catch {
-  }
-  return false;
-}
-async function openAgentSyncPanel() {
-  const dashboardOpened = await openAgentSyncDashboard();
-  if (dashboardOpened) return true;
-  try {
-    await vscode.commands.executeCommand("agentsync.panel.focus");
-    return true;
-  } catch {
-  }
-  try {
-    await vscode.commands.executeCommand("workbench.view.extension.agentsync");
-    await vscode.commands.executeCommand("agentsync.panel.focus");
-    return true;
-  } catch {
-  }
-  return false;
-}
-async function openAgentSyncTutorial(context) {
-  const manifest = context?.extension?.packageJSON || {};
-  const publisher = String(manifest.publisher || "teambotics");
-  const name = String(manifest.name || "agentsync");
-  const extensionId = `${publisher}.${name}`.toLowerCase();
-  const walkthroughId = `${extensionId}#agentsync.gettingStarted`;
-  try {
-    await vscode.commands.executeCommand("workbench.action.openWalkthrough", walkthroughId, false);
-    return true;
-  } catch {
-  }
-  try {
-    await vscode.commands.executeCommand("workbench.action.openWalkthroughs");
-    return true;
-  } catch {
-  }
-  return false;
-}
-async function openAgentSyncDocs(context) {
-  const manifest = context?.extension?.packageJSON || {};
-  const target = String(manifest.homepage || manifest.repository?.url || "").trim();
-  if (!target) return false;
-  try {
-    await vscode.env.openExternal(vscode.Uri.parse(target));
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function ensureTrackerExists(context, workspaceFolder) {
-  const trackerPath = getTrackerPath(workspaceFolder);
-  if (fs.existsSync(trackerPath)) return true;
-  const choice = await vscode.window.showWarningMessage(
-    `AgentTracker.md not found in "${workspaceFolder.name}". Initialize this workspace first?`,
-    "Initialize",
-    "Cancel"
-  );
-  if (choice !== "Initialize") return false;
-  await initWorkspace(context, workspaceFolder);
-  return fs.existsSync(trackerPath);
-}
-function readTracker(workspaceFolder) {
-  try {
-    return fs.readFileSync(getTrackerPath(workspaceFolder), "utf8");
-  } catch {
-    return null;
-  }
-}
-function writeTracker(workspaceFolder, content) {
-  atomicWriteFileSync(getTrackerPath(workspaceFolder), content);
-  invalidateWorkspaceCaches(workspaceFolder);
-}
-function writeStateFile(workspaceFolder, data) {
-  try {
-    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
-    const existingState = readStateFile(workspaceFolder) || {};
-    const existingIntegration = existingState.integration && typeof existingState.integration === "object" ? existingState.integration : {};
-    const snapshotMeta = getWorkspaceSnapshotService().getMetadata(workspaceFolder);
-    const previousVersion = Math.max(
-      0,
-      Number(existingIntegration?.snapshot?.version || 0)
-    );
-    const snapshotVersion = Math.max(previousVersion + 1, Number(snapshotMeta.version || 0), 1);
-    const snapshotHash = snapshotMeta.hash || getWorkspaceSnapshotService().computeHash(JSON.stringify(data || {}));
-    const integration = {
-      ...existingIntegration,
-      ...data?.integration && typeof data.integration === "object" ? data.integration : {},
-      snapshot: {
-        version: snapshotVersion,
-        hash: snapshotHash || null
-      }
-    };
-    const payload = {
-      ...data,
-      integration
-    };
-    atomicWriteFileSync(getStatePath(workspaceFolder), JSON.stringify(payload, null, 2));
-    invalidateWorkspaceCaches(workspaceFolder);
-  } catch (err) {
-    if (err && err.code !== "ENOENT") console.error("[AgentSync] writeStateFile error:", err);
-  }
-}
-function writeResultFile(workspaceFolder, data) {
-  try {
-    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
-    fs.writeFileSync(getResultPath(workspaceFolder), JSON.stringify(data, null, 2), "utf8");
-  } catch {
-  }
-}
-function getTrackerWarnings(workspaceFolder, tracker) {
-  const warnings = [];
-  const config = readAgentSyncConfig(workspaceFolder);
-  if (!isEmptyValue(tracker.date)) {
-    const parsed = Date.parse(tracker.date);
-    if (Number.isFinite(parsed)) {
-      const ageMs = Date.now() - parsed;
-      if (ageMs > config.staleAfterHours * 60 * 60 * 1e3) {
-        const ageHours = Math.floor(ageMs / (60 * 60 * 1e3));
-        warnings.push(`Tracker is stale (${ageHours}h old).`);
-      }
-    }
-  }
-  const currentBranch = runGit(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (currentBranch && !isEmptyValue(tracker.branch) && tracker.branch !== currentBranch) {
-    warnings.push(`Branch mismatch: tracker=${tracker.branch}, current=${currentBranch}.`);
-  }
-  if (!isEmptyValue(tracker.commit)) {
-    const exitCode = runGitExitCode(workspaceFolder, [
-      "merge-base",
-      "--is-ancestor",
-      tracker.commit,
-      "HEAD"
-    ]);
-    if (exitCode !== 0) {
-      warnings.push(`Tracker commit ${tracker.commit} is not in current HEAD history.`);
-    }
-  }
-  return warnings;
-}
-function getExecutionProvider(value) {
-  const normalized = canonicalAgentId(value);
-  if (!normalized) return null;
-  return EXECUTION_PROVIDER_BY_ID[normalized] || null;
-}
-function getExecutionProviderId(value) {
-  if (isEmptyValue(String(value || ""))) return null;
-  return getExecutionProvider(value)?.id || canonicalAgentId(value) || null;
-}
-function getExecutionProviderLabel(value) {
-  if (isEmptyValue(String(value || ""))) return null;
-  const provider = getExecutionProvider(value);
-  if (provider) return provider.label;
-  const text = String(value || "").trim();
-  return text || null;
-}
-function getSessionProviderInfo(session, fallback = null) {
-  const providerId = canonicalAgentId(session?.provider_id || "") || getExecutionProviderId(session?.provider_label || "") || getExecutionProviderId(session?.agent || "") || getExecutionProviderId(fallback);
-  const providerLabel = getExecutionProviderLabel(session?.provider_label || "") || getExecutionProviderLabel(session?.agent || "") || getExecutionProviderLabel(fallback) || "Unknown";
-  return { id: providerId, label: providerLabel };
-}
-function getPersonalityDisplayName(workspaceFolder, personalityId) {
-  const normalized = canonicalAgentId(personalityId);
-  if (!normalized) return null;
-  try {
-    const catalog = getAgentCatalog(workspaceFolder);
-    const match = catalog?.agents?.find((agent) => canonicalAgentId(agent.id) === normalized);
-    return match?.name || null;
-  } catch {
-    return null;
-  }
-}
-function getSessionPersonalityInfo(workspaceFolder, session) {
-  const personalityId = canonicalAgentId(session?.personality_id || "") || canonicalAgentId(session?.agent_personality_id || "") || null;
-  const personalityName = String(session?.personality_name || "").trim() || getPersonalityDisplayName(workspaceFolder, personalityId) || "None";
-  return { id: personalityId, name: personalityName };
-}
-async function promptForAgent(defaultAgent) {
-  const defaultLabel = getExecutionProviderLabel(defaultAgent) || "Codex";
-  const builtIn = EXECUTION_PROVIDER_DEFS.map((provider) => ({
-    label: provider.label,
-    description: provider.label === defaultLabel ? "default" : void 0
-  }));
-  const choice = await vscode.window.showQuickPick(
-    [...builtIn, { label: "Other" }],
-    { placeHolder: "Select the execution provider for this session" }
-  );
-  if (!choice) return null;
-  if (choice.label !== "Other") return choice.label;
-  const custom = await vscode.window.showInputBox({
-    prompt: "Enter provider name",
-    value: defaultLabel !== "Codex" ? defaultLabel : ""
-  });
-  if (custom === void 0) return null;
-  const trimmed = custom.trim();
-  return trimmed || null;
-}
-function summarizeHealthCounts(health) {
-  const counts = { pass: 0, fail: 0, notConfigured: 0, total: 0 };
-  for (const status of Object.values(health || {})) {
-    const normalized = toSingleLine(status).toLowerCase();
-    if (normalized === "pass") counts.pass += 1;
-    else if (normalized === "fail") counts.fail += 1;
-    else counts.notConfigured += 1;
-    counts.total += 1;
-  }
-  return counts;
-}
-function buildDeterministicSessionSummary(params) {
-  const goal = toSingleLine(params.goal) || "Session update";
-  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : [];
-  const topFiles = hotFiles.slice(0, 2);
-  const filesText = topFiles.length > 0 ? `${hotFiles.length} hot file${hotFiles.length === 1 ? "" : "s"} (${topFiles.join(", ")})` : "0 hot files";
-  const healthCounts = summarizeHealthCounts(params.health || {});
-  const healthText = `health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}`;
-  return truncateSingleLine(`${goal}; ${filesText}; ${healthText}.`, params.maxSummaryLength);
-}
-function resolveAutomationRoute(config, agent) {
-  const agentId = canonicalAgentId(agent);
-  if (!agentId) return null;
-  const route = config?.automation?.handoffRoutingDefaults?.[agentId];
-  if (!route || typeof route !== "object") return null;
-  const ownerMode = String(route.owner_mode || "").toLowerCase();
-  const toAgents = Array.isArray(route.to_agents) ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean) : [];
-  const requiredCapabilities = Array.isArray(route.required_capabilities) ? route.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean) : [];
-  if (ownerMode === "single" && toAgents.length === 1) {
-    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
-  }
-  if (ownerMode === "shared" && toAgents.length === 2) {
-    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] };
-  }
-  if (ownerMode === "auto" && requiredCapabilities.length > 0) {
-    return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities };
-  }
-  return null;
-}
-function buildAutomationHandoffNotes(params) {
-  const summary = toSingleLine(params.summary);
-  const sourceAgent = canonicalAgentId(params.sourceAgent) || "unknown";
-  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : [];
-  const topFiles = hotFiles.slice(0, 2).join(", ") || "none";
-  const healthCounts = summarizeHealthCounts(params.health || {});
-  return toSingleLine(
-    `Auto-drafted from ${sourceAgent}. Goal: ${summary}. Start with files: ${topFiles}. Health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}.`
-  );
-}
-function buildHandoffPromptLines(handoffRecord) {
-  if (!handoffRecord || handoffRecord.no_handoff_reason) return [];
-  const handoffId = toSingleLine(handoffRecord.handoff_id) || "HO-UNKNOWN";
-  const branch = toSingleLine(handoffRecord.branch) || PLACEHOLDER;
-  const commit = toSingleLine(handoffRecord.commit) || PLACEHOLDER;
-  const files = Array.isArray(handoffRecord.files) ? handoffRecord.files.filter(Boolean) : [];
-  const startFiles = files.slice(0, 2).join(", ") || "AgentTracker.md";
-  const summary = toSingleLine(handoffRecord.summary) || "continue the current work";
-  const mode = String(handoffRecord.owner_mode || "").toLowerCase();
-  const modelTier = handoffRecord.recommended_model_tier || null;
-  const modelJustification = toSingleLine(handoffRecord.model_justification || "");
-  let modelSuffix = "";
-  if (modelTier === "worker") {
-    modelSuffix = " [Worker-tier task: use a lighter model]";
-  } else if (modelTier === "lead") {
-    modelSuffix = " [Lead-tier task: use a capable model";
-    if (modelJustification) modelSuffix += " \u2014 " + modelJustification;
-    modelSuffix += "]";
-  }
-  const hints = handoffRecord.context_hints || null;
-  let contextSuffix = "";
-  if (hints) {
-    const parts = [];
-    if (Array.isArray(hints.entry_points) && hints.entry_points.length > 0) {
-      parts.push("entry points: " + hints.entry_points.slice(0, 3).join(", "));
-    }
-    if (Array.isArray(hints.relevant_symbols) && hints.relevant_symbols.length > 0) {
-      parts.push("key symbols: " + hints.relevant_symbols.slice(0, 5).join(", "));
-    }
-    if (parts.length > 0) contextSuffix = " Context: " + parts.join("; ") + ".";
-  }
-  const buildLine = (targetLabel) => `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json + .agentsync/context-capsule.json.${modelSuffix}${contextSuffix}`;
-  if (mode === "auto") {
-    const caps = Array.isArray(handoffRecord.required_capabilities) ? handoffRecord.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean) : [];
-    const capabilityLabel = caps.length > 0 ? `capabilities ${caps.join(", ")}` : "required capabilities";
-    return [buildLine(capabilityLabel)];
-  }
-  const targets = Array.isArray(handoffRecord.to_agents) ? handoffRecord.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean) : [];
-  if (targets.length === 0) return [buildLine("next owner")];
-  return targets.map((target) => buildLine(target));
-}
-async function promptAutomationFallbackRouting(hotFileCount) {
-  const modeChoice = await vscode.window.showQuickPick(
-    [
-      { label: "single", description: "Route to one target agent" },
-      { label: "shared", description: "Route to exactly two agents" },
-      { label: "auto", description: "Route by required capabilities" },
-      { label: "skip", description: "Skip creating a handoff record for now" }
-    ],
-    {
-      placeHolder: `${hotFileCount} hot file(s) detected. Select fallback routing mode.`,
-      ignoreFocusOut: true
-    }
-  );
-  if (!modeChoice) return null;
-  const selected = modeChoice.label;
-  if (selected === "skip") {
-    return {
-      handoffData: {
-        no_handoff_reason: "Zero-touch fallback selected skip.",
-        automation_context: "fallback:skip"
-      },
-      automationContext: "fallback:skip"
-    };
-  }
-  const inputPrompt = selected === "single" ? "Fallback target agent (single owner)" : selected === "shared" ? "Fallback target agents (comma-separated, exactly two)" : "Fallback required capabilities (comma-separated)";
-  const rawInput = await vscode.window.showInputBox({
-    prompt: inputPrompt,
-    ignoreFocusOut: true,
-    validateInput: (value) => {
-      const parts = String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
-      if (selected === "single")
-        return parts.length === 1 ? null : "Enter exactly one target agent.";
-      if (selected === "shared")
-        return parts.length === 2 ? null : "Enter exactly two target agents.";
-      return parts.length > 0 ? null : "Enter at least one capability.";
-    }
-  });
-  if (rawInput === void 0) return null;
-  const values = rawInput.split(",").map((v) => v.trim()).filter(Boolean);
-  if (selected === "single") {
-    return {
-      handoffData: {
-        owner_mode: "single",
-        to_agents: [canonicalAgentId(values[0])],
-        required_capabilities: [],
-        no_handoff_reason: null,
-        automation_context: "fallback:single"
-      },
-      automationContext: "fallback:single"
-    };
-  }
-  if (selected === "shared") {
-    return {
-      handoffData: {
-        owner_mode: "shared",
-        to_agents: values.slice(0, 2).map((v) => canonicalAgentId(v)),
-        required_capabilities: [],
-        no_handoff_reason: null,
-        automation_context: "fallback:shared"
-      },
-      automationContext: "fallback:shared"
-    };
-  }
-  return {
-    handoffData: {
-      owner_mode: "auto",
-      to_agents: [],
-      required_capabilities: values,
-      no_handoff_reason: null,
-      automation_context: "fallback:auto"
-    },
-    automationContext: "fallback:auto"
-  };
-}
-async function copyHandoffPromptToClipboard(promptLines) {
-  if (!Array.isArray(promptLines) || promptLines.length === 0) return false;
-  if (promptLines.length === 1) {
-    await vscode.env.clipboard.writeText(promptLines[0]);
-    return true;
-  }
-  const picks = promptLines.map((line, index) => ({
-    label: `Prompt ${index + 1}`,
-    description: line,
-    line
-  }));
-  const selected = await vscode.window.showQuickPick(picks, {
-    placeHolder: "Select which handoff prompt to copy",
-    ignoreFocusOut: true
-  });
-  if (!selected) return false;
-  await vscode.env.clipboard.writeText(selected.line);
-  return true;
-}
-function updateHandoffPromptCopiedFlag(workspaceFolder, handoffId, copied) {
-  const normalizedId = toSingleLine(handoffId);
-  if (!normalizedId) return;
-  const store = readHandoffs(workspaceFolder);
-  if (!store.handoffs.length) return;
-  const next = store.handoffs.map((handoff) => {
-    if (toSingleLine(handoff?.handoff_id) !== normalizedId) return handoff;
-    return {
-      ...handoff,
-      prompt_copied_to_clipboard: copied === true,
-      updated_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  });
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: next });
-}
-function findClaimableHandoff(workspaceFolder, agentId) {
-  const canonical = canonicalAgentId(agentId);
-  if (!canonical) return null;
-  const { handoffs } = readHandoffs(workspaceFolder);
-  return handoffs.find((h) => {
-    if (String(h?.status || "").toLowerCase() !== "queued") return false;
-    const owners = getHandoffOwners(h);
-    return owners.length === 0 || owners.includes(canonical);
-  }) || null;
-}
-function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
-  const store = readHandoffs(workspaceFolder);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const normalizedId = toSingleLine(handoffId);
-  const canonical = canonicalAgentId(agentId);
-  if (!normalizedId) return { ok: false, reason: "missing_handoff_id" };
-  if (!canonical) return { ok: false, reason: "missing_agent" };
-  let result = { ok: false, reason: "not_found" };
-  const updated = store.handoffs.map((h) => {
-    if (toSingleLine(h?.handoff_id) !== normalizedId) return h;
-    const currentStatus = String(h?.status || "").toLowerCase();
-    const owners = getHandoffOwners(h);
-    const lastClaim = Array.isArray(h?.state_history) && h.state_history.length > 0 ? h.state_history[h.state_history.length - 1] : null;
-    const claimedBy = lastClaim?.agent ? canonicalAgentId(lastClaim.agent) : null;
-    if (currentStatus === "in_progress") {
-      result = { ok: false, reason: "already_claimed", claimedBy };
-      return h;
-    }
-    if (currentStatus !== "queued") {
-      result = { ok: false, reason: "not_claimable", status: currentStatus || "unknown" };
-      return h;
-    }
-    if (owners.length > 0 && !owners.includes(canonical)) {
-      result = { ok: false, reason: "not_assigned" };
-      return h;
-    }
-    result = { ok: true, handoffId: normalizedId };
-    return {
-      ...h,
-      status: "in_progress",
-      updated_at: now,
-      state_history: [
-        ...Array.isArray(h.state_history) ? h.state_history : [],
-        { status: "in_progress", agent: canonical, timestamp: now, reason: "claimed via agentsync" }
-      ]
-    };
-  });
-  if (!result.ok) return result;
-  const claimedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId);
-  if (claimedRecord) {
-    const validation = validateHandoff(claimedRecord);
-    if (!validation.valid) {
-      return { ok: false, reason: "invalid_handoff", errors: validation.errors };
-    }
-  }
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated });
-  return result;
-}
-var HANDOFF_ALLOWED_STATUSES = /* @__PURE__ */ new Set([
-  "queued",
-  "in_progress",
-  "blocked",
-  "ready_for_review",
-  "approved",
-  "merged",
-  "escalated"
-]);
-function normalizeHandoffStatus(status, fallback = "queued") {
-  const normalized = String(status || "").toLowerCase().trim();
-  if (HANDOFF_ALLOWED_STATUSES.has(normalized)) return normalized;
-  return fallback;
-}
-function buildHandoffId(handoffs, now) {
-  const dateStr = now.slice(0, 10).replace(/-/g, "");
-  const existing = new Set((handoffs || []).map((h) => toSingleLine(h?.handoff_id)));
-  let seq = Math.max(1, (handoffs || []).length + 1);
-  while (seq < 1e4) {
-    const id = `HO-${dateStr}-${String(seq).padStart(3, "0")}`;
-    if (!existing.has(id)) return id;
-    seq += 1;
-  }
-  return `HO-${dateStr}-${Date.now().toString().slice(-6)}`;
-}
-function syncTrackerHandoffsSection(workspaceFolder) {
-  const content = readTracker(workspaceFolder);
-  if (!content) return;
-  const { handoffs } = readHandoffs(workspaceFolder);
-  const updated = setSectionBody(
-    content,
-    "Agent Handoffs",
-    handoffs.length > 0 ? renderTrackerHandoffsSection(handoffs) : "No open handoffs."
-  );
-  writeTracker(workspaceFolder, updated);
-}
-function createHandoffRecord(workspaceFolder, input = {}) {
-  const store = readHandoffs(workspaceFolder);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const fromAgent = canonicalAgentId(input.from_agent || input.agent || "agency");
-  const toAgents = Array.isArray(input.to_agents) ? input.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean) : [];
-  const requiredCaps = Array.isArray(input.required_capabilities) ? input.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean) : [];
-  const skipReason = input.no_handoff_reason !== null && input.no_handoff_reason !== void 0 ? toSingleLine(input.no_handoff_reason) : null;
-  const modeInput = String(input.owner_mode || "").toLowerCase();
-  let ownerMode = modeInput;
-  if (!ownerMode) {
-    ownerMode = toAgents.length >= 2 ? "shared" : toAgents.length === 1 ? "single" : "auto";
-  }
-  const record = {
-    handoff_id: toSingleLine(input.handoff_id) || buildHandoffId(store.handoffs, now),
-    task_id: toSingleLine(input.task_id) || null,
-    from_agent: fromAgent || "agency",
-    to_agents: toAgents,
-    owner_mode: ownerMode,
-    status: normalizeHandoffStatus(input.status, "queued"),
-    required_capabilities: requiredCaps,
-    summary: toSingleLine(input.summary) || (skipReason ? "Handoff skipped by agent" : "Agency handoff"),
-    notes: toSingleLine(input.notes || ""),
-    no_handoff_reason: skipReason || null,
-    files: Array.isArray(input.files) ? input.files.map((f) => toSingleLine(f)).filter(Boolean) : [],
-    branch: toSingleLine(input.branch) || null,
-    commit: toSingleLine(input.commit) || null,
-    prior_attempts: Number.isFinite(Number(input.prior_attempts)) ? Math.max(0, Math.round(Number(input.prior_attempts))) : 0,
-    recommended_model_tier: input.recommended_model_tier === "lead" || input.recommended_model_tier === "worker" ? input.recommended_model_tier : null,
-    model_justification: toSingleLine(input.model_justification) || null,
-    context_hints: input.context_hints && typeof input.context_hints === "object" ? input.context_hints : null,
-    source_system: toSingleLine(input.source_system) || null,
-    source_run_id: toSingleLine(input.source_run_id) || null,
-    source_event_id: toSingleLine(input.source_event_id) || null,
-    created_at: now,
-    updated_at: now,
-    state_history: [
-      {
-        status: normalizeHandoffStatus(input.status, "queued"),
-        agent: fromAgent || "agency",
-        timestamp: now,
-        reason: skipReason ? "created (skip)" : "created"
-      }
-    ]
-  };
-  if (skipReason) {
-    record.owner_mode = "auto";
-    record.to_agents = [];
-    if (!record.required_capabilities.length) {
-      record.required_capabilities = ["skip-handoff"];
-    }
-  } else if (record.owner_mode === "single" && record.to_agents.length !== 1) {
-    record.owner_mode = "auto";
-    record.to_agents = [];
-    if (record.required_capabilities.length === 0) record.required_capabilities = ["handoff"];
-  } else if (record.owner_mode === "shared" && record.to_agents.length !== 2) {
-    record.owner_mode = "auto";
-    record.to_agents = [];
-    if (record.required_capabilities.length === 0) record.required_capabilities = ["handoff"];
-  } else if (record.owner_mode === "auto" && record.required_capabilities.length === 0) {
-    record.required_capabilities = ["handoff"];
-  }
-  const { valid, errors } = validateHandoff(record);
-  if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: [...store.handoffs, record] });
-  syncTrackerHandoffsSection(workspaceFolder);
-  return record;
-}
-function completeHandoffRecord(workspaceFolder, handoffId, status, agentId, reason = null) {
-  const normalizedId = toSingleLine(handoffId);
-  const nextStatus = normalizeHandoffStatus(status, "merged");
-  const actor = canonicalAgentId(agentId);
-  if (!normalizedId) return { ok: false, reason: "missing_handoff_id" };
-  if (!actor) return { ok: false, reason: "missing_agent" };
-  const store = readHandoffs(workspaceFolder);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  let found = false;
-  const updated = store.handoffs.map((h) => {
-    if (toSingleLine(h?.handoff_id) !== normalizedId) return h;
-    found = true;
-    return {
-      ...h,
-      status: nextStatus,
-      updated_at: now,
-      state_history: [
-        ...Array.isArray(h.state_history) ? h.state_history : [],
-        {
-          status: nextStatus,
-          agent: actor,
-          timestamp: now,
-          reason: toSingleLine(reason) || "completed via agentsync"
-        }
-      ]
-    };
-  });
-  if (!found) return { ok: false, reason: "not_found" };
-  const completedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId);
-  if (completedRecord) {
-    const validation = validateHandoff(completedRecord);
-    if (!validation.valid) {
-      return { ok: false, reason: "invalid_handoff", errors: validation.errors };
-    }
-  }
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated });
-  syncTrackerHandoffsSection(workspaceFolder);
-  advanceChainOnCompletion(workspaceFolder, normalizedId);
-  return { ok: true, handoffId: normalizedId, status: nextStatus };
-}
-function listHandoffRecords(workspaceFolder) {
-  const store = readHandoffs(workspaceFolder);
-  return store.handoffs;
-}
-function getAgencySyncPaths(workspaceFolder) {
-  const base = path.join(workspaceFolder.uri.fsPath, ".agencysync");
-  return {
-    base,
-    runs: path.join(base, "runs.json"),
-    events: path.join(base, "events")
-  };
-}
-function tryReadJson(filePath) {
-  try {
-    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-function listJsonFilesRecursive(dirPath) {
-  if (!fs.existsSync(dirPath)) return [];
-  const files = [];
-  const walk = (current) => {
-    const entries = fs.readdirSync(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) files.push(full);
-    }
-  };
-  walk(dirPath);
-  return files;
-}
-function normalizeAgencyCandidate(raw, meta = {}) {
-  if (!raw || typeof raw !== "object") return null;
-  const toAgents = Array.isArray(raw.to_agents || raw.owners || raw.assignees) ? raw.to_agents || raw.owners || raw.assignees : [];
-  const requiredCaps = Array.isArray(raw.required_capabilities || raw.capabilities) ? raw.required_capabilities || raw.capabilities : [];
-  const sourceRunId = toSingleLine(raw.run_id || raw.runId || meta.sourceRunId || "") || null;
-  const sourceEventId = toSingleLine(raw.event_id || raw.eventId || meta.sourceEventId || "") || null;
-  const modeInput = String(raw.owner_mode || "").toLowerCase();
-  const ownerMode = modeInput || (toAgents.length >= 2 ? "shared" : toAgents.length === 1 ? "single" : "auto");
-  const normalizedMode = ownerMode === "single" || ownerMode === "shared" || ownerMode === "auto" ? ownerMode : "auto";
-  return {
-    handoff_id: toSingleLine(raw.handoff_id || raw.handoffId || ""),
-    task_id: toSingleLine(raw.task_id || raw.taskId || raw.id || ""),
-    from_agent: canonicalAgentId(raw.from_agent || raw.agent || raw.source_agent || "agency"),
-    to_agents: toAgents.map((a) => canonicalAgentId(a)).filter(Boolean),
-    owner_mode: normalizedMode,
-    status: normalizeHandoffStatus(raw.status || raw.state, "queued"),
-    required_capabilities: requiredCaps.map((c) => toSingleLine(c)).filter(Boolean),
-    summary: toSingleLine(raw.summary || raw.title || raw.message || ""),
-    notes: toSingleLine(raw.notes || raw.description || ""),
-    files: Array.isArray(raw.files || raw.changed_files) ? (raw.files || raw.changed_files).map((f) => toSingleLine(f)).filter(Boolean) : [],
-    branch: toSingleLine(raw.branch || ""),
-    commit: toSingleLine(raw.commit || raw.sha || ""),
-    no_handoff_reason: toSingleLine(raw.no_handoff_reason || "") || null,
-    source_system: "agencysync",
-    source_run_id: sourceRunId,
-    source_event_id: sourceEventId
-  };
-}
-function syncAgencyRunsCore(workspaceFolder) {
-  const paths = getAgencySyncPaths(workspaceFolder);
-  const errors = [];
-  if (!fs.existsSync(paths.base)) {
-    return { synced: 0, created: 0, updated: 0, errors };
-  }
-  const candidates = [];
-  const runsData = tryReadJson(paths.runs);
-  if (Array.isArray(runsData)) {
-    runsData.forEach((run, index) => {
-      const candidate = normalizeAgencyCandidate(run, {
-        sourceRunId: toSingleLine(run?.id || run?.run_id || index + 1) || null
+      const lastSession = lastSessionFromState || lastSessionFromTracker;
+      const updatedInProgressLines = [...currentLines, entry];
+      writeStateFile2(workspaceFolder, {
+        sessionActive: true,
+        lastUpdated: startedAt,
+        activeSession: {
+          ...sessionIdentity,
+          goal: normalizedGoal,
+          startedAt
+        },
+        sessionMetrics: {
+          filesOpened: 0,
+          filesModified: 0,
+          commandsRun: 0,
+          startedAt
+        },
+        lastSession,
+        hotFiles: [],
+        inProgress: updatedInProgressLines
       });
-      if (candidate) candidates.push(candidate);
-    });
-  }
-  const eventFiles = listJsonFilesRecursive(paths.events);
-  for (const filePath of eventFiles) {
-    const eventData = tryReadJson(filePath);
-    const sourceEventId = path.relative(paths.events, filePath).replace(/\\/g, "/");
-    const rows = Array.isArray(eventData) ? eventData : eventData ? [eventData] : [];
-    rows.forEach((row, index) => {
-      const candidate = normalizeAgencyCandidate(row, {
-        sourceEventId: `${sourceEventId}#${index + 1}`,
-        sourceRunId: toSingleLine(row?.run_id || row?.runId || "") || null
-      });
-      if (candidate) candidates.push(candidate);
-    });
-  }
-  if (candidates.length === 0) {
-    const state2 = readStateFile(workspaceFolder) || {};
-    const integration2 = {
-      ...state2.integration && typeof state2.integration === "object" ? state2.integration : {},
-      lastAgencySyncAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    writeStateFile(workspaceFolder, { ...state2, integration: integration2, lastUpdated: (/* @__PURE__ */ new Date()).toISOString() });
-    return { synced: 0, created: 0, updated: 0, errors };
-  }
-  const store = readHandoffs(workspaceFolder);
-  let created = 0;
-  let updatedCount = 0;
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const next = [...store.handoffs];
-  const resolveExistingIndex = (candidate) => {
-    const cid = toSingleLine(candidate.handoff_id);
-    if (cid) {
-      const byId = next.findIndex((h) => toSingleLine(h?.handoff_id) === cid);
-      if (byId >= 0) return byId;
+      return { agent: sessionIdentity.provider_label, goal: normalizedGoal };
     }
-    if (candidate.source_event_id) {
-      const byEvent = next.findIndex((h) => toSingleLine(h?.source_event_id) === candidate.source_event_id);
-      if (byEvent >= 0) return byEvent;
-    }
-    if (candidate.source_run_id && candidate.task_id) {
-      const byRunTask = next.findIndex(
-        (h) => toSingleLine(h?.source_run_id) === candidate.source_run_id && toSingleLine(h?.task_id) === candidate.task_id
+    async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData = null, options = {}) {
+      let content = readTracker2(workspaceFolder);
+      if (!content) throw new Error("Could not read AgentTracker.md");
+      const config = readAgentSyncConfig2(workspaceFolder);
+      const zeroTouchCfg = config.automation?.endSessionZeroTouch || DEFAULT_END_SESSION_ZERO_TOUCH2;
+      const state = readStateFile2(workspaceFolder) || {};
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const branch = runGit2(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]) || PLACEHOLDER2;
+      const commit = runGit2(workspaceFolder, ["rev-parse", "--short", "HEAD"]) || PLACEHOLDER2;
+      const hotFiles = Array.isArray(options.hotFiles) ? options.hotFiles : getHotFilesCached2(workspaceFolder, { force: true });
+      const signatureChanges = detectSignatureChanges(workspaceFolder, hotFiles);
+      const complexityInfo = scoreNextTaskCapabilities2(
+        hotFiles,
+        signatureChanges,
+        state?.sessionMetrics || {},
+        state?.priorAttempts || 0
       );
-      if (byRunTask >= 0) return byRunTask;
-    }
-    return -1;
-  };
-  for (const candidate of candidates) {
-    try {
-      const idx = resolveExistingIndex(candidate);
-      if (idx >= 0) {
-        const existing = next[idx];
-        const merged = {
-          ...existing,
-          ...candidate,
-          handoff_id: toSingleLine(existing.handoff_id || candidate.handoff_id || "") || buildHandoffId(next, now),
-          task_id: toSingleLine(existing.task_id || candidate.task_id) || null,
-          from_agent: canonicalAgentId(candidate.from_agent || existing.from_agent || "agency"),
-          to_agents: Array.isArray(candidate.to_agents) && candidate.to_agents.length > 0 ? candidate.to_agents : Array.isArray(existing.to_agents) ? existing.to_agents : [],
-          owner_mode: candidate.owner_mode || existing.owner_mode || (Array.isArray(candidate.to_agents) && candidate.to_agents.length >= 2 ? "shared" : Array.isArray(candidate.to_agents) && candidate.to_agents.length === 1 ? "single" : "auto"),
-          required_capabilities: Array.isArray(candidate.required_capabilities) && candidate.required_capabilities.length > 0 ? candidate.required_capabilities : Array.isArray(existing.required_capabilities) ? existing.required_capabilities : [],
-          summary: candidate.summary || existing.summary || "Agency handoff",
-          notes: candidate.notes || existing.notes || "",
-          updated_at: now,
-          created_at: existing.created_at || now,
-          state_history: [
-            ...Array.isArray(existing.state_history) ? existing.state_history : [],
-            {
-              status: normalizeHandoffStatus(candidate.status || existing.status, "queued"),
-              agent: canonicalAgentId(candidate.from_agent || existing.from_agent || "agency"),
-              timestamp: now,
-              reason: "synced from .agencysync"
-            }
-          ]
-        };
-        if (merged.no_handoff_reason) {
-          merged.owner_mode = "auto";
-          merged.to_agents = [];
-          if (!Array.isArray(merged.required_capabilities) || merged.required_capabilities.length === 0) {
-            merged.required_capabilities = ["skip-handoff"];
-          }
-        } else if (merged.owner_mode === "auto" && merged.required_capabilities.length === 0) {
-          merged.required_capabilities = ["handoff"];
-        }
-        const validation = validateHandoff(merged);
-        if (!validation.valid) throw new Error(validation.errors.join("; "));
-        next[idx] = merged;
-        updatedCount += 1;
-      } else {
-        const createdRecord = createHandoffRecord(workspaceFolder, {
-          ...candidate,
-          summary: candidate.summary || "Agency handoff",
-          notes: candidate.notes || "",
-          source_system: "agencysync"
-        });
-        next.push(createdRecord);
-        created += 1;
+      let health = options.healthResults;
+      let healthOutputs = options.healthOutputs;
+      if (!health || !healthOutputs) {
+        const checks = await runHealthChecks2(workspaceFolder);
+        health = checks.results;
+        healthOutputs = checks.outputs;
       }
-    } catch (err) {
-      errors.push(err && err.message ? err.message : "Unknown agency sync error");
-    }
-  }
-  if (updatedCount > 0) {
-    writeHandoffs(workspaceFolder, { version: 1, handoffs: next });
-  }
-  syncTrackerHandoffsSection(workspaceFolder);
-  const state = readStateFile(workspaceFolder) || {};
-  const integration = {
-    ...state.integration && typeof state.integration === "object" ? state.integration : {},
-    lastAgencySyncAt: now
-  };
-  writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: now });
-  return { synced: candidates.length, created, updated: updatedCount, errors };
-}
-function buildSessionIdentity(workspaceFolder, providerLabel, options = {}) {
-  const providerId = getExecutionProviderId(options.providerId || providerLabel);
-  const providerDisplay = getExecutionProviderLabel(options.providerLabel || providerLabel) || "Unknown";
-  const personalityId = canonicalAgentId(options.personalityId || "");
-  const personalityName = String(options.personalityName || "").trim() || getPersonalityDisplayName(workspaceFolder, personalityId) || null;
-  return {
-    provider_id: providerId,
-    provider_label: providerDisplay,
-    personality_id: personalityId,
-    personality_name: personalityName,
-    // Legacy field retained for backward-compatible readers.
-    agent: providerDisplay
-  };
-}
-function updateActiveSessionContext(workspaceFolder, updates = {}) {
-  const state = readStateFile(workspaceFolder) || {};
-  if (!state?.sessionActive || !state?.activeSession) return null;
-  const nextSession = {
-    ...state.activeSession,
-    ...updates
-  };
-  writeStateFile(workspaceFolder, {
-    ...state,
-    lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
-    activeSession: nextSession
-  });
-  return nextSession;
-}
-function startSessionCore(workspaceFolder, agent, goal, options = {}) {
-  const content = readTracker(workspaceFolder);
-  if (!content) throw new Error("Could not read AgentTracker.md");
-  const existingTracker = parseTracker(content);
-  const normalizedGoal = (goal || "").trim() || "Session started";
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const sessionIdentity = buildSessionIdentity(workspaceFolder, agent, options);
-  const entry = `- [ ] ${sessionIdentity.provider_label} (${startedAt}): ${normalizedGoal}`;
-  const currentBody = getSectionBody(content, "In Progress");
-  const currentLines = currentBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line && line.toLowerCase() !== "*nothing active*");
-  const updatedBody = [...currentLines, entry].join("\n");
-  const updated = setSectionBody(content, "In Progress", updatedBody || "*Nothing active*");
-  writeTracker(workspaceFolder, updated);
-  const existingState = readStateFile(workspaceFolder) || {};
-  const lastSessionFromState = existingState.lastSession || null;
-  const lastSessionFromTracker = isEmptyValue(existingTracker.agent) ? null : {
-    agent: existingTracker.agent,
-    date: existingTracker.date,
-    summary: existingTracker.summary,
-    branch: existingTracker.branch,
-    commit: existingTracker.commit
-  };
-  const lastSession = lastSessionFromState || lastSessionFromTracker;
-  const updatedInProgressLines = [...currentLines, entry];
-  writeStateFile(workspaceFolder, {
-    sessionActive: true,
-    lastUpdated: startedAt,
-    activeSession: {
-      ...sessionIdentity,
-      goal: normalizedGoal,
-      startedAt
-    },
-    sessionMetrics: {
-      filesOpened: 0,
-      filesModified: 0,
-      commandsRun: 0,
-      startedAt
-    },
-    lastSession,
-    hotFiles: [],
-    inProgress: updatedInProgressLines
-  });
-  return { agent: sessionIdentity.provider_label, goal: normalizedGoal };
-}
-async function endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData = null, options = {}) {
-  let content = readTracker(workspaceFolder);
-  if (!content) throw new Error("Could not read AgentTracker.md");
-  const config = readAgentSyncConfig(workspaceFolder);
-  const zeroTouchCfg = config.automation?.endSessionZeroTouch || DEFAULT_END_SESSION_ZERO_TOUCH;
-  const state = readStateFile(workspaceFolder) || {};
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const branch = runGit(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]) || PLACEHOLDER;
-  const commit = runGit(workspaceFolder, ["rev-parse", "--short", "HEAD"]) || PLACEHOLDER;
-  const hotFiles = Array.isArray(options.hotFiles) ? options.hotFiles : getHotFilesCached(workspaceFolder, { force: true });
-  const signatureChanges = detectSignatureChanges(workspaceFolder, hotFiles);
-  const complexityInfo = scoreNextTaskCapabilities(
-    hotFiles,
-    signatureChanges,
-    state?.sessionMetrics || {},
-    state?.priorAttempts || 0
-  );
-  let health = options.healthResults;
-  let healthOutputs = options.healthOutputs;
-  if (!health || !healthOutputs) {
-    const checks = await runHealthChecks(workspaceFolder);
-    health = checks.results;
-    healthOutputs = checks.outputs;
-  }
-  if (!health || typeof health !== "object") health = {};
-  if (!healthOutputs || typeof healthOutputs !== "object") healthOutputs = {};
-  const goalHint = toSingleLine(options.goalHint || state?.activeSession?.goal || "");
-  let normalizedSummary = toSingleLine(summary);
-  let summarySource = options.summarySource === "deterministic" ? "deterministic" : "user";
-  let automationUsed = options.automationUsed === true;
-  const automationFeatureEnabled = zeroTouchCfg.enabled || options.automationUsed === true;
-  if (!normalizedSummary && zeroTouchCfg.enabled) {
-    normalizedSummary = buildDeterministicSessionSummary({
-      goal: goalHint,
-      hotFiles,
-      health,
-      maxSummaryLength: zeroTouchCfg.maxSummaryLength
-    });
-    summarySource = "deterministic";
-    automationUsed = true;
-  }
-  const persistedSummary = normalizedSummary || PLACEHOLDER;
-  let automationContext = toSingleLine(
-    options.automationContext || handoffData && handoffData.automation_context || ""
-  ) || null;
-  if (hotFiles.length > 0 && handoffData === null && zeroTouchCfg.enabled) {
-    const autoRoute = resolveAutomationRoute(config, agent);
-    if (autoRoute) {
-      handoffData = {
-        summary: normalizedSummary || "Session update",
-        notes: buildAutomationHandoffNotes({
-          summary: normalizedSummary || "Session update",
+      if (!health || typeof health !== "object") health = {};
+      if (!healthOutputs || typeof healthOutputs !== "object") healthOutputs = {};
+      const goalHint = toSingleLine2(options.goalHint || state?.activeSession?.goal || "");
+      let normalizedSummary = toSingleLine2(summary);
+      let summarySource = options.summarySource === "deterministic" ? "deterministic" : "user";
+      let automationUsed = options.automationUsed === true;
+      const automationFeatureEnabled = zeroTouchCfg.enabled || options.automationUsed === true;
+      if (!normalizedSummary && zeroTouchCfg.enabled) {
+        normalizedSummary = buildDeterministicSessionSummary2({
+          goal: goalHint,
           hotFiles,
           health,
-          sourceAgent: agent
-        }),
-        owner_mode: autoRoute.owner_mode,
-        to_agents: autoRoute.to_agents,
-        required_capabilities: autoRoute.required_capabilities,
-        no_handoff_reason: null,
-        automation_context: "default:" + canonicalAgentId(agent)
-      };
-      automationContext = handoffData.automation_context;
-      automationUsed = true;
-    }
-  }
-  if (hotFiles.length > 0 && config.requireHandoffOnEndSession && handoffData === null) {
-    throw new Error(
-      "Handoff note required when hot files exist. Provide handoffData or set no_handoff_reason."
-    );
-  }
-  content = setSectionBody(
-    content,
-    "Last Session",
-    [
-      "- **Agent:** " + agent,
-      "- **Date:** " + now,
-      "- **Summary:** " + persistedSummary,
-      "- **Branch:** " + branch,
-      "- **Commit:** " + commit
-    ].join("\n")
-  );
-  content = setSectionBody(content, "Current Health", formatHealthTable(health, healthOutputs));
-  content = setSectionBody(
-    content,
-    "Hot Files",
-    hotFiles.length > 0 ? hotFiles.map((file) => "- `" + file + "`").join("\n") : "*None*"
-  );
-  const inProgressBody = getSectionBody(content, "In Progress");
-  const remainingInProgress = inProgressBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line).filter((line) => line.toLowerCase() !== "*nothing active*").filter((line) => !line.toLowerCase().includes(agent.toLowerCase()));
-  content = setSectionBody(
-    content,
-    "In Progress",
-    remainingInProgress.length > 0 ? remainingInProgress.join("\n") : "*Nothing active*"
-  );
-  const normalizedNextWork = toSingleLine(nextWork);
-  if (normalizedNextWork) {
-    const existingNext = getSectionBody(content, "Suggested Next Work").split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line);
-    content = setSectionBody(
-      content,
-      "Suggested Next Work",
-      [...existingNext, "- " + normalizedNextWork].join("\n")
-    );
-  }
-  if (signatureChanges.length > 0) {
-    const existingGotchas = getSectionBody(content, "Known Issues & Gotchas").split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line);
-    const sigLines = signatureChanges.map(
-      ({ file, change }) => `- \u26A0 Signature change in \`${file}\`: \`${change.trim().slice(0, 120)}\``
-    );
-    content = setSectionBody(
-      content,
-      "Known Issues & Gotchas",
-      [...existingGotchas, ...sigLines].join("\n")
-    );
-  }
-  let handoffRecord = null;
-  let generatedPromptLines = [];
-  if (handoffData !== null) {
-    const existingHandoffs = readHandoffs(workspaceFolder);
-    const allHandoffs = existingHandoffs.handoffs;
-    const dateStr = now.slice(0, 10).replace(/-/g, "");
-    const seq = String(allHandoffs.length + 1).padStart(3, "0");
-    const handoffId = "HO-" + dateStr + "-" + seq;
-    if (handoffData.no_handoff_reason) {
-      const skipReason = String(handoffData.no_handoff_reason).trim();
-      if (!skipReason) throw new Error("no_handoff_reason must be a non-empty string");
-      handoffRecord = {
-        handoff_id: handoffId,
-        task_id: null,
-        from_agent: canonicalAgentId(agent),
-        to_agents: [],
-        owner_mode: "auto",
-        status: "queued",
-        required_capabilities: ["skip-handoff"],
-        summary: "Handoff skipped by agent",
-        notes: toSingleLine(handoffData.notes || ""),
-        no_handoff_reason: skipReason,
-        files: hotFiles,
-        branch,
-        commit,
-        prior_attempts: 0,
-        generated_prompt_lines: [],
-        prompt_copied_to_clipboard: false,
-        summary_source: summarySource,
-        automation_context: automationContext,
-        created_at: now,
-        updated_at: now,
-        state_history: [
-          { status: "queued", agent: canonicalAgentId(agent), timestamp: now, reason: "skipped" }
-        ]
-      };
-      const { valid, errors } = validateHandoff(handoffRecord);
-      if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
-    } else {
-      const modelTier = handoffData.recommended_model_tier || null;
-      const modelJustification = handoffData.model_justification || null;
-      const contextHints = handoffData.context_hints || null;
-      handoffRecord = {
-        handoff_id: handoffId,
-        task_id: handoffData.task_id || null,
-        from_agent: canonicalAgentId(agent),
-        to_agents: (handoffData.to_agents || []).map((a) => canonicalAgentId(a)),
-        owner_mode: String(handoffData.owner_mode || "single").toLowerCase(),
-        status: "queued",
-        required_capabilities: handoffData.required_capabilities || [],
-        summary: toSingleLine(handoffData.summary || normalizedSummary || "Session update"),
-        notes: toSingleLine(handoffData.notes || ""),
-        no_handoff_reason: null,
-        recommended_model_tier: modelTier,
-        model_justification: modelJustification ? toSingleLine(modelJustification) : null,
-        context_hints: contextHints,
-        files: hotFiles,
-        branch,
-        commit,
-        prior_attempts: 0,
-        agent_personality_id: handoffData.agent_personality_id || null,
-        suggested_agent_personality_id: null,
-        generated_prompt_lines: [],
-        prompt_copied_to_clipboard: false,
-        summary_source: summarySource,
-        automation_context: toSingleLine(handoffData.automation_context || automationContext || "") || null,
-        created_at: now,
-        updated_at: now,
-        state_history: [
-          {
-            status: "queued",
-            agent: canonicalAgentId(agent),
-            timestamp: now,
-            reason: "session ended with hot files"
-          }
-        ]
-      };
-      const { valid, errors } = validateHandoff(handoffRecord);
-      if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
-    }
-    if (handoffRecord && !handoffRecord.suggested_agent_personality_id && !handoffRecord.no_handoff_reason) {
-      try {
-        const catalog = getAgentCatalog(workspaceFolder);
-        if (catalog && catalog.agents.length > 0) {
-          const caps = handoffRecord.required_capabilities || complexityInfo.capabilities || [];
-          const matched = matchAgentsByCapabilities(catalog.agents, caps);
-          if (matched.length > 0) {
-            handoffRecord.suggested_agent_personality_id = matched[0].id;
-          }
-        }
-      } catch {
+          maxSummaryLength: zeroTouchCfg.maxSummaryLength
+        });
+        summarySource = "deterministic";
+        automationUsed = true;
       }
-    }
-    if (automationFeatureEnabled) {
-      generatedPromptLines = buildHandoffPromptLines(handoffRecord);
-      handoffRecord.generated_prompt_lines = generatedPromptLines;
-    } else {
-      delete handoffRecord.generated_prompt_lines;
-      delete handoffRecord.prompt_copied_to_clipboard;
-      delete handoffRecord.summary_source;
-      delete handoffRecord.automation_context;
-    }
-    const updatedHandoffs = [...allHandoffs, handoffRecord];
-    writeHandoffs(workspaceFolder, { version: 1, handoffs: updatedHandoffs });
-    content = setSectionBody(
-      content,
-      "Agent Handoffs",
-      renderTrackerHandoffsSection(updatedHandoffs)
-    );
-  } else {
-    const existingHandoffs = readHandoffs(workspaceFolder);
-    if (existingHandoffs.handoffs.length > 0) {
-      content = setSectionBody(
+      const persistedSummary = normalizedSummary || PLACEHOLDER2;
+      let automationContext = toSingleLine2(
+        options.automationContext || handoffData && handoffData.automation_context || ""
+      ) || null;
+      if (hotFiles.length > 0 && handoffData === null && zeroTouchCfg.enabled) {
+        const autoRoute = resolveAutomationRoute2(config, agent);
+        if (autoRoute) {
+          handoffData = {
+            summary: normalizedSummary || "Session update",
+            notes: buildAutomationHandoffNotes2({
+              summary: normalizedSummary || "Session update",
+              hotFiles,
+              health,
+              sourceAgent: agent
+            }),
+            owner_mode: autoRoute.owner_mode,
+            to_agents: autoRoute.to_agents,
+            required_capabilities: autoRoute.required_capabilities,
+            no_handoff_reason: null,
+            automation_context: "default:" + canonicalAgentId2(agent)
+          };
+          automationContext = handoffData.automation_context;
+          automationUsed = true;
+        }
+      }
+      if (hotFiles.length > 0 && config.requireHandoffOnEndSession && handoffData === null) {
+        throw new Error(
+          "Handoff note required when hot files exist. Provide handoffData or set no_handoff_reason."
+        );
+      }
+      content = setSectionBody2(
         content,
-        "Agent Handoffs",
-        renderTrackerHandoffsSection(existingHandoffs.handoffs)
+        "Last Session",
+        [
+          "- **Agent:** " + agent,
+          "- **Date:** " + now,
+          "- **Summary:** " + persistedSummary,
+          "- **Branch:** " + branch,
+          "- **Commit:** " + commit
+        ].join("\n")
       );
-    }
-  }
-  writeTracker(workspaceFolder, content);
-  const currentHandoffs = readHandoffs(workspaceFolder);
-  const openHandoffs2 = currentHandoffs.handoffs.filter(isOpenHandoff);
-  const shouldWriteAutomationState = automationFeatureEnabled && (automationUsed || summarySource === "deterministic" || generatedPromptLines.length > 0);
-  const existingMetrics = readStateFile(workspaceFolder)?.sessionMetrics || {};
-  const existingState = readStateFile(workspaceFolder) || {};
-  const activeSessionIdentity = buildSessionIdentity(
-    workspaceFolder,
-    agent,
-    existingState?.activeSession || {}
-  );
-  const stateLastSession = {
-    ...activeSessionIdentity,
-    date: now,
-    summary: persistedSummary,
-    branch,
-    commit,
-    sessionMetrics: {
-      filesModified: existingMetrics.filesModified || 0,
-      commandsRun: existingMetrics.commandsRun || 0,
-      durationMs: Date.now() - (parseISODate(existingMetrics.startedAt) || Date.now())
-    }
-  };
-  if (shouldWriteAutomationState) {
-    stateLastSession.generatedSummary = normalizedSummary || persistedSummary;
-    stateLastSession.summarySource = summarySource;
-    stateLastSession.automationUsed = automationUsed;
-    stateLastSession.generatedPrompts = generatedPromptLines;
-  }
-  try {
-    removePersonalityFromWorkspace(workspaceFolder.uri.fsPath);
-  } catch {
-  }
-  writeStateFile(workspaceFolder, {
-    sessionActive: false,
-    lastUpdated: now,
-    activeSession: null,
-    lastSession: stateLastSession,
-    health: Object.fromEntries(
-      Object.entries(health).map(([label, status]) => [
-        label,
-        { status, output: healthOutputs[label] || "" }
-      ])
-    ),
-    hotFiles,
-    inProgress: remainingInProgress,
-    openHandoffCount: openHandoffs2.length,
-    activeHandoffIds: openHandoffs2.map((h) => String(h.handoff_id || h.task_id || ""))
-  });
-  return {
-    health,
-    healthOutputs,
-    hotFiles,
-    handoff: handoffRecord,
-    generatedSummary: normalizedSummary || persistedSummary,
-    summarySource,
-    handoffPrompts: generatedPromptLines,
-    promptCopiedToClipboard: false,
-    signatureChanges,
-    complexityInfo
-  };
-}
-function clearActiveSessionCore(workspaceFolder) {
-  const statePath = getStatePath(workspaceFolder);
-  if (!fs.existsSync(statePath)) return { cleared: false, agent: null };
-  let state;
-  try {
-    state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  } catch {
-    return { cleared: false, agent: null };
-  }
-  if (!state?.sessionActive || !state?.activeSession) {
-    return { cleared: false, agent: null };
-  }
-  const agent = String(state.activeSession.agent || "").trim() || null;
-  const content = readTracker(workspaceFolder);
-  if (content) {
-    const inProgressBody = getSectionBody(content, "In Progress");
-    const remaining = inProgressBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line).filter((line) => line.toLowerCase() !== "*nothing active*").filter((line) => !agent || !line.toLowerCase().includes(agent.toLowerCase()));
-    const updated = setSectionBody(
-      content,
-      "In Progress",
-      remaining.length > 0 ? remaining.join("\n") : "*Nothing active*"
-    );
-    writeTracker(workspaceFolder, updated);
-  }
-  writeStateFile(workspaceFolder, {
-    ...state,
-    sessionActive: false,
-    activeSession: null,
-    lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
-  });
-  return { cleared: true, agent };
-}
-var _dropZoneInFlight = /* @__PURE__ */ new Set();
-async function processDropZoneRequest(workspaceFolder) {
-  const folderKey = workspaceFolder.uri.fsPath;
-  if (_dropZoneInFlight.has(folderKey)) return;
-  const requestPath = getRequestPath(workspaceFolder);
-  const claimPath = requestPath + ".processing";
-  try {
-    fs.renameSync(requestPath, claimPath);
-  } catch {
-    return;
-  }
-  _dropZoneInFlight.add(folderKey);
-  let request;
-  try {
-    const raw = fs.readFileSync(claimPath, "utf8");
-    request = JSON.parse(raw);
-  } catch {
-    writeResultFile(workspaceFolder, {
-      ok: false,
-      error: "Invalid JSON in request file",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    try {
-      fs.unlinkSync(claimPath);
-    } catch (err) {
-      if (err && err.code !== "ENOENT") console.error("[AgentSync] drop-zone cleanup error:", err);
-    }
-    _dropZoneInFlight.delete(folderKey);
-    return;
-  }
-  const { action } = request || {};
-  const timestamp = (/* @__PURE__ */ new Date()).toISOString();
-  try {
-    switch (action) {
-      case "startSession": {
-        const { agent, goal } = request;
-        if (!agent) throw new Error("Missing required field: agent");
-        startSessionCore(workspaceFolder, agent, goal || "Session started");
-        const state = readStateFile(workspaceFolder);
-        if (state?.sessionMetrics) {
-          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1;
-          writeStateFile(workspaceFolder, state);
-        }
-        writeResultFile(workspaceFolder, { ok: true, action, timestamp });
-        break;
+      content = setSectionBody2(content, "Current Health", formatHealthTable(health, healthOutputs));
+      content = setSectionBody2(
+        content,
+        "Hot Files",
+        hotFiles.length > 0 ? hotFiles.map((file) => "- `" + file + "`").join("\n") : "*None*"
+      );
+      const inProgressBody = getSectionBody2(content, "In Progress");
+      const remainingInProgress = inProgressBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line).filter((line) => line.toLowerCase() !== "*nothing active*").filter((line) => !line.toLowerCase().includes(agent.toLowerCase()));
+      content = setSectionBody2(
+        content,
+        "In Progress",
+        remainingInProgress.length > 0 ? remainingInProgress.join("\n") : "*Nothing active*"
+      );
+      const normalizedNextWork = toSingleLine2(nextWork);
+      if (normalizedNextWork) {
+        const existingNext = getSectionBody2(content, "Suggested Next Work").split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line);
+        content = setSectionBody2(
+          content,
+          "Suggested Next Work",
+          [...existingNext, "- " + normalizedNextWork].join("\n")
+        );
       }
-      case "endSession": {
-        const { agent, summary, nextWork, handoff } = request;
-        if (!agent) throw new Error("Missing required field: agent");
-        const state = readStateFile(workspaceFolder);
-        if (state?.sessionMetrics) {
-          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1;
-          writeStateFile(workspaceFolder, state);
+      if (signatureChanges.length > 0) {
+        const existingGotchas = getSectionBody2(content, "Known Issues & Gotchas").split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line);
+        const sigLines = signatureChanges.map(
+          ({ file, change }) => `- \u26A0 Signature change in \`${file}\`: \`${change.trim().slice(0, 120)}\``
+        );
+        content = setSectionBody2(
+          content,
+          "Known Issues & Gotchas",
+          [...existingGotchas, ...sigLines].join("\n")
+        );
+      }
+      let handoffRecord = null;
+      let generatedPromptLines = [];
+      if (handoffData !== null) {
+        const existingHandoffs = readHandoffs2(workspaceFolder);
+        const allHandoffs = existingHandoffs.handoffs;
+        const dateStr = now.slice(0, 10).replace(/-/g, "");
+        const seq = String(allHandoffs.length + 1).padStart(3, "0");
+        const handoffId = "HO-" + dateStr + "-" + seq;
+        if (handoffData.no_handoff_reason) {
+          const skipReason = String(handoffData.no_handoff_reason).trim();
+          if (!skipReason) throw new Error("no_handoff_reason must be a non-empty string");
+          handoffRecord = {
+            handoff_id: handoffId,
+            task_id: null,
+            from_agent: canonicalAgentId2(agent),
+            to_agents: [],
+            owner_mode: "auto",
+            status: "queued",
+            required_capabilities: ["skip-handoff"],
+            summary: "Handoff skipped by agent",
+            notes: toSingleLine2(handoffData.notes || ""),
+            no_handoff_reason: skipReason,
+            files: hotFiles,
+            branch,
+            commit,
+            prior_attempts: 0,
+            generated_prompt_lines: [],
+            prompt_copied_to_clipboard: false,
+            summary_source: summarySource,
+            automation_context: automationContext,
+            created_at: now,
+            updated_at: now,
+            state_history: [
+              { status: "queued", agent: canonicalAgentId2(agent), timestamp: now, reason: "skipped" }
+            ]
+          };
+          const { valid, errors } = validateHandoff2(handoffRecord);
+          if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
+        } else {
+          const modelTier = handoffData.recommended_model_tier || null;
+          const modelJustification = handoffData.model_justification || null;
+          const contextHints = handoffData.context_hints || null;
+          handoffRecord = {
+            handoff_id: handoffId,
+            task_id: handoffData.task_id || null,
+            from_agent: canonicalAgentId2(agent),
+            to_agents: (handoffData.to_agents || []).map((a) => canonicalAgentId2(a)),
+            owner_mode: String(handoffData.owner_mode || "single").toLowerCase(),
+            status: "queued",
+            required_capabilities: handoffData.required_capabilities || [],
+            summary: toSingleLine2(handoffData.summary || normalizedSummary || "Session update"),
+            notes: toSingleLine2(handoffData.notes || ""),
+            no_handoff_reason: null,
+            recommended_model_tier: modelTier,
+            model_justification: modelJustification ? toSingleLine2(modelJustification) : null,
+            context_hints: contextHints,
+            files: hotFiles,
+            branch,
+            commit,
+            prior_attempts: 0,
+            agent_personality_id: handoffData.agent_personality_id || null,
+            suggested_agent_personality_id: null,
+            generated_prompt_lines: [],
+            prompt_copied_to_clipboard: false,
+            summary_source: summarySource,
+            automation_context: toSingleLine2(handoffData.automation_context || automationContext || "") || null,
+            created_at: now,
+            updated_at: now,
+            state_history: [
+              {
+                status: "queued",
+                agent: canonicalAgentId2(agent),
+                timestamp: now,
+                reason: "session ended with hot files"
+              }
+            ]
+          };
+          const { valid, errors } = validateHandoff2(handoffRecord);
+          if (!valid) throw new Error("Invalid handoff: " + errors.join("; "));
         }
-        const hasProvidedSummary = typeof summary === "string" && toSingleLine(summary).length > 0;
-        const zeroTouchEnabled = readAgentSyncConfig(workspaceFolder).automation?.endSessionZeroTouch?.enabled === true;
-        const {
-          health,
-          hotFiles,
-          handoff: handoffRecord,
-          generatedSummary,
-          summarySource,
-          handoffPrompts
-        } = await endSessionCore(
-          workspaceFolder,
-          agent,
-          summary || "",
-          nextWork || "",
-          handoff || null,
-          {
-            summarySource: !hasProvidedSummary && zeroTouchEnabled ? "deterministic" : "user",
-            automationUsed: zeroTouchEnabled && !hasProvidedSummary
+        if (handoffRecord && !handoffRecord.suggested_agent_personality_id && !handoffRecord.no_handoff_reason) {
+          try {
+            const catalog = getAgentCatalog2(workspaceFolder);
+            if (catalog && catalog.agents.length > 0) {
+              const caps = handoffRecord.required_capabilities || complexityInfo.capabilities || [];
+              const matched = matchAgentsByCapabilities2(catalog.agents, caps);
+              if (matched.length > 0) {
+                handoffRecord.suggested_agent_personality_id = matched[0].id;
+              }
+            }
+          } catch {
           }
-        );
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: {
-            health,
-            hotFiles,
-            handoff: handoffRecord,
-            generatedSummary,
-            summarySource,
-            handoffPrompts,
-            promptCopiedToClipboard: false
-          }
-        });
-        break;
-      }
-      case "status": {
-        const content = readTracker(workspaceFolder);
-        const tracker = content ? parseTracker(content) : null;
-        const warnings = tracker ? getTrackerWarnings(workspaceFolder, tracker) : [];
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: { tracker, warnings }
-        });
-        break;
-      }
-      case "health": {
-        const { results, outputs } = await runHealthChecks(workspaceFolder);
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: { results, outputs }
-        });
-        break;
-      }
-      case "listHandoffs": {
-        const handoffs = listHandoffRecords(workspaceFolder);
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: { count: handoffs.length, handoffs }
-        });
-        break;
-      }
-      case "claimHandoff": {
-        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id);
-        const agent = toSingleLine(request?.agent);
-        if (!handoffId) throw new Error("Missing required field: handoffId");
-        if (!agent) throw new Error("Missing required field: agent");
-        const result = claimHandoffRecord(workspaceFolder, handoffId, agent);
-        if (!result.ok) {
-          writeResultFile(workspaceFolder, {
-            ok: false,
-            action,
-            timestamp,
-            error: result.reason || "claim failed",
-            data: result
-          });
-          break;
         }
-        syncTrackerHandoffsSection(workspaceFolder);
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: result
-        });
-        break;
-      }
-      case "completeHandoff": {
-        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id);
-        const agent = toSingleLine(request?.agent);
-        const status = toSingleLine(request?.status || "merged") || "merged";
-        const reason = toSingleLine(request?.reason || "") || null;
-        if (!handoffId) throw new Error("Missing required field: handoffId");
-        if (!agent) throw new Error("Missing required field: agent");
-        const result = completeHandoffRecord(workspaceFolder, handoffId, status, agent, reason);
-        if (!result.ok) {
-          writeResultFile(workspaceFolder, {
-            ok: false,
-            action,
-            timestamp,
-            error: result.reason || "complete failed",
-            data: result
-          });
-          break;
+        if (automationFeatureEnabled) {
+          generatedPromptLines = buildHandoffPromptLines(handoffRecord);
+          handoffRecord.generated_prompt_lines = generatedPromptLines;
+        } else {
+          delete handoffRecord.generated_prompt_lines;
+          delete handoffRecord.prompt_copied_to_clipboard;
+          delete handoffRecord.summary_source;
+          delete handoffRecord.automation_context;
         }
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: result
-        });
-        break;
-      }
-      case "createHandoff": {
-        const handoff = request?.handoff;
-        if (!handoff || typeof handoff !== "object") {
-          throw new Error("Missing required field: handoff");
+        const updatedHandoffs = [...allHandoffs, handoffRecord];
+        writeHandoffs2(workspaceFolder, { version: 1, handoffs: updatedHandoffs });
+        content = setSectionBody2(
+          content,
+          "Agent Handoffs",
+          renderTrackerHandoffsSection(updatedHandoffs)
+        );
+      } else {
+        const existingHandoffs = readHandoffs2(workspaceFolder);
+        if (existingHandoffs.handoffs.length > 0) {
+          content = setSectionBody2(
+            content,
+            "Agent Handoffs",
+            renderTrackerHandoffsSection(existingHandoffs.handoffs)
+          );
         }
-        const created = createHandoffRecord(workspaceFolder, handoff);
-        writeResultFile(workspaceFolder, {
-          ok: true,
-          action,
-          timestamp,
-          data: { handoff: created }
-        });
-        break;
       }
-      case "syncAgencyRuns": {
-        const data = syncAgencyRunsCore(workspaceFolder);
-        writeResultFile(workspaceFolder, { ok: true, action, timestamp, data });
-        break;
+      writeTracker(workspaceFolder, content);
+      const currentHandoffs = readHandoffs2(workspaceFolder);
+      const openHandoffs2 = currentHandoffs.handoffs.filter(isOpenHandoff);
+      const shouldWriteAutomationState = automationFeatureEnabled && (automationUsed || summarySource === "deterministic" || generatedPromptLines.length > 0);
+      const existingMetrics = readStateFile2(workspaceFolder)?.sessionMetrics || {};
+      const existingState = readStateFile2(workspaceFolder) || {};
+      const activeSessionIdentity = buildSessionIdentity2(
+        workspaceFolder,
+        agent,
+        existingState?.activeSession || {}
+      );
+      const stateLastSession = {
+        ...activeSessionIdentity,
+        date: now,
+        summary: persistedSummary,
+        branch,
+        commit,
+        sessionMetrics: {
+          filesModified: existingMetrics.filesModified || 0,
+          commandsRun: existingMetrics.commandsRun || 0,
+          durationMs: Date.now() - (parseISODate2(existingMetrics.startedAt) || Date.now())
+        }
+      };
+      if (shouldWriteAutomationState) {
+        stateLastSession.generatedSummary = normalizedSummary || persistedSummary;
+        stateLastSession.summarySource = summarySource;
+        stateLastSession.automationUsed = automationUsed;
+        stateLastSession.generatedPrompts = generatedPromptLines;
       }
-      default:
-        throw new Error(`Unknown action: ${action || "(none)"}`);
-    }
-  } catch (err) {
-    writeResultFile(workspaceFolder, { ok: false, error: err.message, action, timestamp });
-  } finally {
-    try {
-      fs.unlinkSync(claimPath);
-    } catch (err) {
-      if (err && err.code !== "ENOENT") console.error("[AgentSync] drop-zone cleanup error:", err);
-    }
-    _dropZoneInFlight.delete(folderKey);
-  }
-}
-function getDashboardModel(workspaceFolder, viewMode = "compact") {
-  const snapshot = getWorkspaceSnapshot(workspaceFolder);
-  const trackerContent = snapshot.trackerContent;
-  const tracker = snapshot.tracker;
-  const state = snapshot.state;
-  const config = snapshot.config;
-  const handoffInfo = snapshot.handoffInfo;
-  const inProgressLines = snapshot.inProgressLines;
-  const currentProvider = getSessionProviderInfo(
-    state?.activeSession || state?.lastSession || null,
-    tracker.agent
-  );
-  const activePersonality = getSessionPersonalityInfo(workspaceFolder, state?.activeSession || null);
-  const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS;
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProvider.id, staleAfterHours);
-  const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
-  const opsState = getOperationalState(
-    state,
-    inProgressLines,
-    handoffInfo.handoffs,
-    autoStaleSessionMinutes
-  );
-  const warnings = trackerContent ? getTrackerWarnings(workspaceFolder, tracker) : [];
-  const sessionWarnMinutes = config.tokenBudget?.sessionDurationWarningMinutes || 0;
-  if (sessionWarnMinutes > 0 && state?.sessionActive && state?.activeSession?.startedAt) {
-    const started = parseISODate(state.activeSession.startedAt);
-    if (Number.isFinite(started)) {
-      const ageMinutes = (Date.now() - started) / 6e4;
-      if (ageMinutes >= sessionWarnMinutes) {
-        warnings.push(
-          `Session running ${formatElapsed(Date.now() - started)} \u2014 consider ending and handing off to reduce context size.`
-        );
-      }
-    }
-  }
-  const health = state?.health || {};
-  const healthLabels = ["Build", "Tests", "Deploy"];
-  const missingHealthChecks = healthLabels.filter((label) => {
-    const status = String(health?.[label]?.status ?? health?.[label] ?? "Not configured");
-    return status === "Not configured";
-  });
-  if (missingHealthChecks.length > 0) {
-    warnings.push(
-      `Setup needed: ${missingHealthChecks.join(", ")} checks are not configured.`
-    );
-  }
-  const hotFiles = new Set(getHotFilesCached(workspaceFolder).map(normalizeRepoRelativePath));
-  const getSuggestedNextStep = () => {
-    if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.';
-    if (state?.sessionActive)
-      return 'Use "End Session" when you are done, or "Clear Active Session" if stale.';
-    if (handoffBuckets.runnable.length > 0)
-      return 'Use "Run Next Step" to claim the next runnable handoff and prepare its prompt.';
-    if (inProgressLines.length > 0)
-      return "Review in-progress items, then start a new session to continue.";
-    if (handoffBuckets.open.length > 0)
-      return "Review blocked or provider-specific handoffs, then unblock or complete the earlier step.";
-    if (missingHealthChecks.length > 0)
-      return "Configure build/test/deploy commands to unlock health reporting on End Session.";
-    return 'Ready to start. Use "Start Session" before making changes.';
-  };
-  const onboarding = {
-    initialized: Boolean(trackerContent),
-    started: Boolean(state?.sessionActive) || Boolean(state?.activeSession?.startedAt) || Boolean(state?.lastSession?.startedAt),
-    ended: !state?.sessionActive && (Boolean(state?.lastSession?.endedAt) || !isEmptyValue(tracker.date) && !isEmptyValue(tracker.summary))
-  };
-  const toStatus = (entry) => {
-    const value = entry?.status ?? entry ?? "Not configured";
-    return String(value || "Not configured");
-  };
-  const summarizeHandoff = (h) => ({
-    id: String(h?.handoff_id || h?.task_id || "unknown"),
-    summary: String(h?.summary || h?.task_id || "No summary"),
-    status: String(h?.status || "queued"),
-    mode: String(h?.owner_mode || "unknown"),
-    owners: getHandoffOwners(h)
-  });
-  const summarizeHandoffCard = (h, stale = false) => {
-    const files = Array.isArray(h?.files) ? h.files : [];
-    const toAgents = getHandoffOwners(h);
-    const personalityId = getHandoffPersonalityId(h);
-    const personalityName = getPersonalityDisplayName(workspaceFolder, personalityId);
-    return {
-      id: String(h?.handoff_id || h?.task_id || "unknown"),
-      summary: String(h?.summary || "No summary"),
-      from_agent: String(h?.from_agent || "unknown"),
-      to_agents_display: toAgents.join(", ") || "provider-flex",
-      files_display: files.length > 3 ? files.slice(0, 3).join(", ") + " (+" + (files.length - 3) + " more)" : files.join(", ") || "none",
-      status: String(h?.status || "queued"),
-      notes: String(h?.notes || ""),
-      personality: personalityName || personalityId || "Auto",
-      recommended_model_tier: h?.recommended_model_tier || null,
-      model_justification: String(h?.model_justification || ""),
-      stale_observation: stale
-    };
-  };
-  const compactTasks = inProgressLines.slice(0, 2);
-  const compactExtraTaskCount = Math.max(0, inProgressLines.length - compactTasks.length);
-  const rawSessionGoal = String(state?.activeSession?.goal || "").trim();
-  const rawFirstInProgress = String(inProgressLines[0] || "").trim();
-  const rawTrackerSummary = String(state?.lastSession?.summary || tracker.summary || "").trim();
-  let focusText = "No active goal";
-  if (!isEmptyValue(rawSessionGoal)) {
-    focusText = rawSessionGoal;
-  } else if (!isEmptyValue(rawFirstInProgress)) {
-    focusText = rawFirstInProgress;
-  } else if (!isEmptyValue(rawTrackerSummary)) {
-    focusText = rawTrackerSummary;
-  }
-  const normalizedViewMode = viewMode === "full" ? "full" : "compact";
-  const defaultShortcuts = [
-    "agentsync.startSession",
-    "agentsync.runNextStep",
-    "agentsync.endSession",
-    "agentsync.openTracker",
-    "agentsync.contextStatus"
-  ];
-  const shortcutsBase = Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0 ? config.dashboardShortcuts : defaultShortcuts;
-  const shortcuts = shortcutsBase.includes("agentsync.runNextStep") ? shortcutsBase : [shortcutsBase[0] || "agentsync.startSession", "agentsync.runNextStep", ...shortcutsBase.slice(1)];
-  return {
-    hasWorkspace: true,
-    workspace: workspaceFolder.name,
-    ui: {
-      viewMode: normalizedViewMode
-    },
-    shortcuts,
-    state: {
-      key: opsState.key,
-      label: opsState.label,
-      reason: opsState.reason,
-      pulse: getStatePulseFrame(opsState.key)
-    },
-    refreshedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    nextStep: getSuggestedNextStep(),
-    onboarding,
-    session: {
-      active: Boolean(state?.sessionActive),
-      provider: state?.sessionActive ? currentProvider.label : "None",
-      personality: state?.sessionActive ? activePersonality.name : "None",
-      goal: state?.activeSession?.goal || "No active goal",
-      startedAt: state?.activeSession?.startedAt || null
-    },
-    tracker: {
-      lastAgent: state?.lastSession?.provider_label || state?.lastSession?.agent || tracker.agent,
-      lastDate: state?.lastSession?.date || tracker.date,
-      lastSummary: state?.lastSession?.summary || tracker.summary,
-      branch: state?.lastSession?.branch || tracker.branch,
-      commit: state?.lastSession?.commit || tracker.commit
-    },
-    warnings,
-    inProgress: inProgressLines,
-    compact: {
-      focusText,
-      tasks: compactTasks,
-      extraTaskCount: compactExtraTaskCount
-    },
-    health: {
-      Build: toStatus(health.Build),
-      Tests: toStatus(health.Tests),
-      Deploy: toStatus(health.Deploy)
-    },
-    handoffs: {
-      exists: handoffInfo.exists,
-      parseError: handoffInfo.error,
-      openCount: handoffBuckets.open.length,
-      assignedToMe: handoffBuckets.assignedToMe.slice(0, 8).map(summarizeHandoff),
-      sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 8).map(summarizeHandoff),
-      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff),
-      queued: handoffBuckets.runnable.slice(0, 10).map((h) => {
-        const isStale = (h.files || []).some(
-          (file) => hotFiles.has(normalizeRepoRelativePath(file))
-        );
-        return summarizeHandoffCard(h, isStale);
-      })
-    },
-    agentCatalog: (() => {
       try {
-        const catalog = getAgentCatalog(workspaceFolder);
-        if (!catalog) return { loaded: false, totalAgents: 0, categories: [] };
-        const catSummary = catalog.categories.map((cat) => ({
-          name: cat,
-          color: AGENT_CATEGORY_COLORS[cat] || "#888",
-          count: catalog.agents.filter((a) => a.category === cat).length
-        }));
-        return { loaded: true, totalAgents: catalog.agents.length, categories: catSummary };
+        removePersonalityFromWorkspace(workspaceFolder.uri.fsPath);
       } catch {
-        return { loaded: false, totalAgents: 0, categories: [] };
       }
-    })(),
-    pipelines: (() => {
-      const chains = /* @__PURE__ */ new Map();
-      for (const h of handoffInfo.handoffs) {
-        if (!h.chain_id) continue;
-        if (!chains.has(h.chain_id)) chains.set(h.chain_id, []);
-        chains.get(h.chain_id).push(h);
-      }
-      return Array.from(chains.entries()).map(([chainId, steps]) => {
-        steps.sort((a, b) => (a.chain_step || 0) - (b.chain_step || 0));
-        return {
-          chainId,
-          total: steps[0]?.chain_total || steps.length,
-          steps: steps.map((s) => ({
-            step: s.chain_step || 0,
-            agentName: getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(s)) || getHandoffPersonalityId(s) || "Auto",
-            status: String(s.status || "blocked"),
-            handoffId: String(s.handoff_id || ""),
-            summary: String(s.summary || "")
-          }))
-        };
+      writeStateFile2(workspaceFolder, {
+        sessionActive: false,
+        lastUpdated: now,
+        activeSession: null,
+        lastSession: stateLastSession,
+        health: Object.fromEntries(
+          Object.entries(health).map(([label, status]) => [
+            label,
+            { status, output: healthOutputs[label] || "" }
+          ])
+        ),
+        hotFiles,
+        inProgress: remainingInProgress,
+        openHandoffCount: openHandoffs2.length,
+        activeHandoffIds: openHandoffs2.map((h) => String(h.handoff_id || h.task_id || ""))
       });
-    })()
-  };
-}
-function generateContextCapsule(workspaceFolder) {
-  const snapshot = getWorkspaceSnapshot(workspaceFolder, { force: true });
-  const state = snapshot.state || null;
-  const tracker = snapshot.tracker || {
-    agent: PLACEHOLDER,
-    date: PLACEHOLDER,
-    summary: PLACEHOLDER,
-    branch: PLACEHOLDER,
-    commit: PLACEHOLDER
-  };
-  const handoffInfo = snapshot.handoffInfo || { handoffs: [] };
-  const config = snapshot.config || {};
-  const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS;
-  const currentProviderId = getSessionProviderInfo(
-    state?.activeSession || state?.lastSession || null,
-    tracker.agent
-  ).id;
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProviderId, staleAfterHours);
-  const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
-  const opsState = getOperationalState(
-    state,
-    snapshot.inProgressLines || [],
-    handoffInfo.handoffs || [],
-    autoStaleSessionMinutes
-  );
-  const hotFiles = getHotFilesCached(workspaceFolder, { force: true });
-  const capsule = {
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    workspace: workspaceFolder.name,
-    state: opsState,
-    session: {
-      active: Boolean(state?.sessionActive),
-      activeSession: state?.activeSession || null,
-      lastSession: state?.lastSession || null,
-      metrics: state?.sessionMetrics || null
-    },
-    tracker: {
-      agent: tracker.agent,
-      date: tracker.date,
-      summary: tracker.summary,
-      branch: tracker.branch,
-      commit: tracker.commit
-    },
-    hotFiles,
-    inProgress: snapshot.inProgressLines || [],
-    handoffs: {
-      openCount: handoffBuckets.open.length,
-      assignedToMe: handoffBuckets.assignedToMe.slice(0, 20),
-      sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 20),
-      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 20)
-    },
-    warnings: getTrackerWarnings(workspaceFolder, tracker)
-  };
-  fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
-  atomicWriteFileSync(getContextCapsulePath(workspaceFolder), JSON.stringify(capsule, null, 2));
-  invalidateWorkspaceCaches(workspaceFolder);
-  return capsule;
-}
-function getDashboardHtml() {
-  const nonce = createNonce();
-  return `<!DOCTYPE html>
+      return {
+        health,
+        healthOutputs,
+        hotFiles,
+        handoff: handoffRecord,
+        generatedSummary: normalizedSummary || persistedSummary,
+        summarySource,
+        handoffPrompts: generatedPromptLines,
+        promptCopiedToClipboard: false,
+        signatureChanges,
+        complexityInfo
+      };
+    }
+    function clearActiveSessionCore(workspaceFolder) {
+      const existingState = readStateFile2(workspaceFolder);
+      if (!existingState?.sessionActive || !existingState?.activeSession) {
+        return { cleared: false, agent: null };
+      }
+      const agent = String(existingState.activeSession.agent || "").trim() || null;
+      const content = readTracker2(workspaceFolder);
+      if (content) {
+        const inProgressBody = getSectionBody2(content, "In Progress");
+        const remaining = inProgressBody.split(/\r?\n/).map((line) => line.trim()).filter((line) => !line.startsWith("<!--")).filter((line) => line).filter((line) => line.toLowerCase() !== "*nothing active*").filter((line) => !agent || !line.toLowerCase().includes(agent.toLowerCase()));
+        const updated = setSectionBody2(
+          content,
+          "In Progress",
+          remaining.length > 0 ? remaining.join("\n") : "*Nothing active*"
+        );
+        writeTracker(workspaceFolder, updated);
+      }
+      writeStateFile2(workspaceFolder, {
+        ...existingState,
+        sessionActive: false,
+        activeSession: null,
+        lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return { cleared: true, agent };
+    }
+    module2.exports = {
+      startSessionCore,
+      endSessionCore,
+      clearActiveSessionCore
+    };
+  }
+});
+
+// src/dashboard/dashboardModel.js
+var require_dashboardModel = __commonJS({
+  "src/dashboard/dashboardModel.js"(exports2, module2) {
+    "use strict";
+    var {
+      getWorkspaceSnapshot: getWorkspaceSnapshot2,
+      getHotFilesCached: getHotFilesCached2,
+      getTrackerWarnings: getTrackerWarnings2,
+      normalizeRepoRelativePath: normalizeRepoRelativePath2,
+      isEmptyValue: isEmptyValue2,
+      parseISODate: parseISODate2,
+      formatElapsed: formatElapsed2,
+      getAgentCatalog: getAgentCatalog2,
+      AGENT_CATEGORY_COLORS,
+      DEFAULT_STALE_HOURS: DEFAULT_STALE_HOURS2
+    } = require_utils();
+    var {
+      getSessionProviderInfo: getSessionProviderInfo2
+    } = require_providers();
+    var {
+      getSessionPersonalityInfo: getSessionPersonalityInfo2,
+      getPersonalityDisplayName: getPersonalityDisplayName2
+    } = require_personalities();
+    var {
+      getHandoffBuckets,
+      getOperationalState: getOperationalState2,
+      getStatePulseFrame: getStatePulseFrame2,
+      getHandoffOwners: getHandoffOwners2,
+      getHandoffPersonalityId
+    } = require_state();
+    function getDashboardModel(workspaceFolder, viewMode = "compact") {
+      const snapshot = getWorkspaceSnapshot2(workspaceFolder);
+      const trackerContent = snapshot.trackerContent;
+      const tracker = snapshot.tracker;
+      const state = snapshot.state;
+      const config = snapshot.config;
+      const handoffInfo = snapshot.handoffInfo;
+      const inProgressLines = snapshot.inProgressLines;
+      const currentProvider = getSessionProviderInfo2(
+        state?.activeSession || state?.lastSession || null,
+        tracker.agent
+      );
+      const activePersonality = getSessionPersonalityInfo2(workspaceFolder, state?.activeSession || null);
+      const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS2;
+      const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentProvider.id, staleAfterHours);
+      const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0;
+      const opsState = getOperationalState2(
+        state,
+        inProgressLines,
+        handoffInfo.handoffs,
+        autoStaleSessionMinutes
+      );
+      const warnings = trackerContent ? getTrackerWarnings2(workspaceFolder, tracker) : [];
+      const sessionWarnMinutes = config.tokenBudget?.sessionDurationWarningMinutes || 0;
+      if (sessionWarnMinutes > 0 && state?.sessionActive && state?.activeSession?.startedAt) {
+        const started = parseISODate2(state.activeSession.startedAt);
+        if (Number.isFinite(started)) {
+          const ageMinutes = (Date.now() - started) / 6e4;
+          if (ageMinutes >= sessionWarnMinutes) {
+            warnings.push(
+              `Session running ${formatElapsed2(Date.now() - started)} \u2014 consider ending and handing off to reduce context size.`
+            );
+          }
+        }
+      }
+      const health = state?.health || {};
+      const healthLabels = ["Build", "Tests", "Deploy"];
+      const missingHealthChecks = healthLabels.filter((label) => {
+        const status = String(health?.[label]?.status ?? health?.[label] ?? "Not configured");
+        return status === "Not configured";
+      });
+      if (missingHealthChecks.length > 0) {
+        warnings.push(
+          `Setup needed: ${missingHealthChecks.join(", ")} checks are not configured.`
+        );
+      }
+      const hotFiles = new Set(getHotFilesCached2(workspaceFolder).map(normalizeRepoRelativePath2));
+      const getSuggestedNextStep = () => {
+        if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.';
+        if (state?.sessionActive)
+          return 'Use "End Session" when you are done, or "Clear Active Session" if stale.';
+        if (handoffBuckets.runnable.length > 0)
+          return 'Use "Run Next Step" to claim the next runnable handoff and prepare its prompt.';
+        if (inProgressLines.length > 0)
+          return "Review in-progress items, then start a new session to continue.";
+        if (handoffBuckets.open.length > 0)
+          return "Review blocked or provider-specific handoffs, then unblock or complete the earlier step.";
+        if (missingHealthChecks.length > 0)
+          return "Configure build/test/deploy commands to unlock health reporting on End Session.";
+        return 'Ready to start. Use "Start Session" before making changes.';
+      };
+      const onboarding = {
+        initialized: Boolean(trackerContent),
+        started: Boolean(state?.sessionActive) || Boolean(state?.activeSession?.startedAt) || Boolean(state?.lastSession?.startedAt),
+        ended: !state?.sessionActive && (Boolean(state?.lastSession?.endedAt) || !isEmptyValue2(tracker.date) && !isEmptyValue2(tracker.summary))
+      };
+      const toStatus = (entry) => {
+        const value = entry?.status ?? entry ?? "Not configured";
+        return String(value || "Not configured");
+      };
+      const summarizeHandoff = (h) => ({
+        id: String(h?.handoff_id || h?.task_id || "unknown"),
+        summary: String(h?.summary || h?.task_id || "No summary"),
+        status: String(h?.status || "queued"),
+        mode: String(h?.owner_mode || "unknown"),
+        owners: getHandoffOwners2(h)
+      });
+      const summarizeHandoffCard = (h, stale = false) => {
+        const files = Array.isArray(h?.files) ? h.files : [];
+        const toAgents = getHandoffOwners2(h);
+        const personalityId = getHandoffPersonalityId(h);
+        const personalityName = getPersonalityDisplayName2(workspaceFolder, personalityId);
+        return {
+          id: String(h?.handoff_id || h?.task_id || "unknown"),
+          summary: String(h?.summary || "No summary"),
+          from_agent: String(h?.from_agent || "unknown"),
+          to_agents_display: toAgents.join(", ") || "provider-flex",
+          files_display: files.length > 3 ? files.slice(0, 3).join(", ") + " (+" + (files.length - 3) + " more)" : files.join(", ") || "none",
+          status: String(h?.status || "queued"),
+          notes: String(h?.notes || ""),
+          personality: personalityName || personalityId || "Auto",
+          recommended_model_tier: h?.recommended_model_tier || null,
+          model_justification: String(h?.model_justification || ""),
+          stale_observation: stale
+        };
+      };
+      const compactTasks = inProgressLines.slice(0, 2);
+      const compactExtraTaskCount = Math.max(0, inProgressLines.length - compactTasks.length);
+      const rawSessionGoal = String(state?.activeSession?.goal || "").trim();
+      const rawFirstInProgress = String(inProgressLines[0] || "").trim();
+      const rawTrackerSummary = String(state?.lastSession?.summary || tracker.summary || "").trim();
+      let focusText = "No active goal";
+      if (!isEmptyValue2(rawSessionGoal)) {
+        focusText = rawSessionGoal;
+      } else if (!isEmptyValue2(rawFirstInProgress)) {
+        focusText = rawFirstInProgress;
+      } else if (!isEmptyValue2(rawTrackerSummary)) {
+        focusText = rawTrackerSummary;
+      }
+      const normalizedViewMode = viewMode === "full" ? "full" : "compact";
+      const defaultShortcuts = [
+        "agentsync.startSession",
+        "agentsync.runNextStep",
+        "agentsync.endSession",
+        "agentsync.openTracker",
+        "agentsync.contextStatus"
+      ];
+      const shortcutsBase = Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0 ? config.dashboardShortcuts : defaultShortcuts;
+      const shortcuts = shortcutsBase.includes("agentsync.runNextStep") ? shortcutsBase : [shortcutsBase[0] || "agentsync.startSession", "agentsync.runNextStep", ...shortcutsBase.slice(1)];
+      return {
+        hasWorkspace: true,
+        workspace: workspaceFolder.name,
+        ui: {
+          viewMode: normalizedViewMode
+        },
+        shortcuts,
+        state: {
+          key: opsState.key,
+          label: opsState.label,
+          reason: opsState.reason,
+          pulse: getStatePulseFrame2(opsState.key)
+        },
+        refreshedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        nextStep: getSuggestedNextStep(),
+        onboarding,
+        session: {
+          active: Boolean(state?.sessionActive),
+          provider: state?.sessionActive ? currentProvider.label : "None",
+          personality: state?.sessionActive ? activePersonality.name : "None",
+          goal: state?.activeSession?.goal || "No active goal",
+          startedAt: state?.activeSession?.startedAt || null
+        },
+        tracker: {
+          lastAgent: state?.lastSession?.provider_label || state?.lastSession?.agent || tracker.agent,
+          lastDate: state?.lastSession?.date || tracker.date,
+          lastSummary: state?.lastSession?.summary || tracker.summary,
+          branch: state?.lastSession?.branch || tracker.branch,
+          commit: state?.lastSession?.commit || tracker.commit
+        },
+        warnings,
+        inProgress: inProgressLines,
+        compact: {
+          focusText,
+          tasks: compactTasks,
+          extraTaskCount: compactExtraTaskCount
+        },
+        health: {
+          Build: toStatus(health.Build),
+          Tests: toStatus(health.Tests),
+          Deploy: toStatus(health.Deploy)
+        },
+        handoffs: {
+          exists: handoffInfo.exists,
+          parseError: handoffInfo.error,
+          openCount: handoffBuckets.open.length,
+          assignedToMe: handoffBuckets.assignedToMe.slice(0, 8).map(summarizeHandoff),
+          sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 8).map(summarizeHandoff),
+          blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff),
+          queued: handoffBuckets.runnable.slice(0, 10).map((h) => {
+            const isStale = (h.files || []).some(
+              (file) => hotFiles.has(normalizeRepoRelativePath2(file))
+            );
+            return summarizeHandoffCard(h, isStale);
+          })
+        },
+        agentCatalog: (() => {
+          try {
+            const catalog = getAgentCatalog2(workspaceFolder);
+            if (!catalog) return { loaded: false, totalAgents: 0, categories: [] };
+            const catSummary = catalog.categories.map((cat) => ({
+              name: cat,
+              color: AGENT_CATEGORY_COLORS[cat] || "#888",
+              count: catalog.agents.filter((a) => a.category === cat).length
+            }));
+            return { loaded: true, totalAgents: catalog.agents.length, categories: catSummary };
+          } catch {
+            return { loaded: false, totalAgents: 0, categories: [] };
+          }
+        })(),
+        pipelines: (() => {
+          const chains = /* @__PURE__ */ new Map();
+          for (const h of handoffInfo.handoffs) {
+            if (!h.chain_id) continue;
+            if (!chains.has(h.chain_id)) chains.set(h.chain_id, []);
+            chains.get(h.chain_id).push(h);
+          }
+          return Array.from(chains.entries()).map(([chainId, steps]) => {
+            steps.sort((a, b) => (a.chain_step || 0) - (b.chain_step || 0));
+            return {
+              chainId,
+              total: steps[0]?.chain_total || steps.length,
+              steps: steps.map((s) => ({
+                step: s.chain_step || 0,
+                agentName: getPersonalityDisplayName2(workspaceFolder, getHandoffPersonalityId(s)) || getHandoffPersonalityId(s) || "Auto",
+                status: String(s.status || "blocked"),
+                handoffId: String(s.handoff_id || ""),
+                summary: String(s.summary || "")
+              }))
+            };
+          });
+        })()
+      };
+    }
+    module2.exports = { getDashboardModel };
+  }
+});
+
+// src/dashboard/dashboardHtml.js
+var require_dashboardHtml = __commonJS({
+  "src/dashboard/dashboardHtml.js"(exports2, module2) {
+    "use strict";
+    var { createNonce } = require_utils();
+    function getDashboardHtml() {
+      const nonce = createNonce();
+      return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -4485,165 +4096,1245 @@ function getDashboardHtml() {
   </script>
 </body>
 </html>`;
-}
-var AgentSyncDashboardViewProvider = class {
-  /**
-   * @param {vscode.ExtensionContext} context
-   */
-  constructor(context) {
-    this.context = context;
-    this.view = null;
-  }
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @returns {string}
-   */
-  getViewModeKey(workspaceFolder) {
-    return `agentsync.dashboard.viewMode::${workspaceFolder.uri.fsPath}`;
-  }
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @returns {'compact' | 'full'}
-   */
-  getViewMode(workspaceFolder) {
-    const key = this.getViewModeKey(workspaceFolder);
-    const stored = String(this.context.workspaceState.get(key, "compact"));
-    return stored === "full" ? "full" : "compact";
-  }
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @param {string} mode
-   * @returns {Promise<void>}
-   */
-  async setViewMode(workspaceFolder, mode) {
-    const normalized = mode === "full" ? "full" : "compact";
-    const key = this.getViewModeKey(workspaceFolder);
-    await this.context.workspaceState.update(key, normalized);
-  }
-  postAction(stage, command, error = null) {
-    if (!this.view) return;
-    this.view.webview.postMessage({
-      type: "action",
-      stage,
-      command,
-      error,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
-  }
-  refresh() {
-    if (!this.view) return;
-    const workspaceFolder = getActiveWorkspaceFolder();
-    if (!workspaceFolder) {
-      this.view.webview.postMessage({ type: "model", model: { hasWorkspace: false } });
-      return;
     }
-    const viewMode = this.getViewMode(workspaceFolder);
-    this.view.webview.postMessage({
-      type: "model",
-      model: getDashboardModel(workspaceFolder, viewMode)
-    });
+    module2.exports = { getDashboardHtml };
   }
-  /**
-   * @param {vscode.WebviewView} webviewView
-   */
-  resolveWebviewView(webviewView) {
-    this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = getDashboardHtml();
-    webviewView.webview.onDidReceiveMessage(async (message) => {
-      if (message?.type === "ui" && message?.action === "setMode") {
-        const workspaceFolder = getActiveWorkspaceFolder();
-        if (!workspaceFolder) return;
-        const mode = String(message?.mode || "");
-        if (mode === "compact" || mode === "full") {
-          await this.setViewMode(workspaceFolder, mode);
-          this.refresh();
+});
+
+// src/dashboard/handoffActions.js
+var require_handoffActions = __commonJS({
+  "src/dashboard/handoffActions.js"(exports2, module2) {
+    "use strict";
+    var vscode2 = require("vscode");
+    var SessionManager2 = require_SessionManager();
+    var { EXECUTION_PROVIDER_DEFS: EXECUTION_PROVIDER_DEFS2, getSessionProviderInfo: getSessionProviderInfo2, getExecutionProviderId: getExecutionProviderId2, getExecutionProviderLabel: getExecutionProviderLabel2 } = require_providers();
+    var { getPersonalityDisplayName: getPersonalityDisplayName2 } = require_personalities();
+    var { PLACEHOLDER: PLACEHOLDER2 } = require_constants();
+    var { toSingleLine: toSingleLine2, canonicalAgentId: canonicalAgentId2 } = require_text();
+    var { readStateFile: readStateFile2, writeStateFile: writeStateFile2, readHandoffs: readHandoffs2, writeHandoffs: writeHandoffs2 } = require_storage();
+    var {
+      claimHandoffRecord: claimHandoffRecord2,
+      syncTrackerHandoffsSection: syncTrackerHandoffsSection2,
+      getHandoffPersonalityId
+    } = require_handoffs();
+    var {
+      assembleAgentPrompt: assembleAgentPrompt2,
+      deliverPrompt: deliverPrompt2,
+      injectPersonalityToWorkspace: injectPersonalityToWorkspace2
+    } = require_executionChannels();
+    var { buildSessionIdentity: buildSessionIdentity2 } = require_session();
+    var { getAgentCatalog: getAgentCatalog2, matchAgentsByCapabilities: matchAgentsByCapabilities2 } = require_agentCatalog();
+    async function promptForAgent2(defaultAgent) {
+      const defaultLabel = getExecutionProviderLabel2(defaultAgent) || "Codex";
+      const builtIn = EXECUTION_PROVIDER_DEFS2.map((provider) => ({
+        label: provider.label,
+        description: provider.label === defaultLabel ? "default" : void 0
+      }));
+      const choice = await vscode2.window.showQuickPick(
+        [...builtIn, { label: "Other" }],
+        { placeHolder: "Select the execution provider for this session" }
+      );
+      if (!choice) return null;
+      if (choice.label !== "Other") return choice.label;
+      const custom = await vscode2.window.showInputBox({
+        prompt: "Enter provider name",
+        value: defaultLabel !== "Codex" ? defaultLabel : ""
+      });
+      if (custom === void 0) return null;
+      const trimmed = custom.trim();
+      return trimmed || null;
+    }
+    function updateActiveSessionContext2(workspaceFolder, updates = {}) {
+      const state = readStateFile2(workspaceFolder) || {};
+      if (!state?.sessionActive || !state?.activeSession) return null;
+      const nextSession = {
+        ...state.activeSession,
+        ...updates
+      };
+      writeStateFile2(workspaceFolder, {
+        ...state,
+        lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+        activeSession: nextSession
+      });
+      return nextSession;
+    }
+    function updateHandoffPromptCopiedFlag2(workspaceFolder, handoffId, copied) {
+      const normalizedId = toSingleLine2(handoffId);
+      if (!normalizedId) return;
+      const store = readHandoffs2(workspaceFolder);
+      if (!store.handoffs.length) return;
+      const next = store.handoffs.map((handoff) => {
+        if (toSingleLine2(handoff?.handoff_id) !== normalizedId) return handoff;
+        return {
+          ...handoff,
+          prompt_copied_to_clipboard: copied === true,
+          updated_at: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      });
+      writeHandoffs2(workspaceFolder, { version: 1, handoffs: next });
+    }
+    function resolveHandoffPersonality2(workspaceFolder, handoff, overridePersonalityId = null) {
+      const catalog = getAgentCatalog2(workspaceFolder);
+      if (!catalog || !Array.isArray(catalog.agents) || catalog.agents.length === 0) return null;
+      const explicitId = canonicalAgentId2(overridePersonalityId || getHandoffPersonalityId(handoff));
+      if (explicitId) {
+        const direct = catalog.agents.find((agent) => canonicalAgentId2(agent.id) === explicitId);
+        if (direct) return direct;
+      }
+      const matched = matchAgentsByCapabilities2(catalog.agents, handoff?.required_capabilities || []);
+      return matched[0] || null;
+    }
+    function buildHandoffExecutionInstruction2(handoff) {
+      const lines = [String(handoff?.summary || "Continue the queued work").trim()];
+      if (handoff?.notes) {
+        lines.push("", "Notes:", String(handoff.notes).trim());
+      }
+      if (Array.isArray(handoff?.files) && handoff.files.length > 0) {
+        lines.push("", "Start with these files:");
+        handoff.files.forEach((file) => lines.push("- " + file));
+      }
+      if (handoff?.branch || handoff?.commit) {
+        lines.push("", `Branch: ${handoff?.branch || PLACEHOLDER2}`);
+        lines.push(`Commit: ${handoff?.commit || PLACEHOLDER2}`);
+      }
+      return lines.join("\n");
+    }
+    async function runHandoffStep2(workspaceFolder, handoff, providerLabel, options = {}) {
+      const providerId = getExecutionProviderId2(providerLabel);
+      const providerDisplay = getExecutionProviderLabel2(providerLabel) || String(providerLabel || "Unknown");
+      const normalizedHandoffId = toSingleLine2(handoff?.handoff_id);
+      const result = claimHandoffRecord2(workspaceFolder, normalizedHandoffId, providerDisplay);
+      if (!result.ok) {
+        vscode2.window.showWarningMessage(
+          `AgentSync: Could not claim ${handoff?.handoff_id || "handoff"} (${result.reason || "unknown reason"}).`
+        );
+        return false;
+      }
+      syncTrackerHandoffsSection2(workspaceFolder);
+      const personality = resolveHandoffPersonality2(
+        workspaceFolder,
+        handoff,
+        options.personalityId || null
+      );
+      const personalityId = personality?.id || canonicalAgentId2(options.personalityId || getHandoffPersonalityId(handoff) || "") || null;
+      const personalityName = personality?.name || getPersonalityDisplayName2(workspaceFolder, personalityId) || null;
+      if (personality && normalizedHandoffId) {
+        const store = readHandoffs2(workspaceFolder);
+        const next = store.handoffs.map((entry) => {
+          if (toSingleLine2(entry?.handoff_id) !== normalizedHandoffId) return entry;
+          return {
+            ...entry,
+            suggested_agent_personality_id: personality.id,
+            updated_at: (/* @__PURE__ */ new Date()).toISOString()
+          };
+        });
+        writeHandoffs2(workspaceFolder, { version: 1, handoffs: next });
+      }
+      if (personality) {
+        injectPersonalityToWorkspace2(workspaceFolder.uri.fsPath, personality);
+      }
+      if (options.ensureSession) {
+        SessionManager2.startSessionCore(
+          workspaceFolder,
+          providerDisplay,
+          toSingleLine2(handoff?.summary) || "Continue queued work",
+          {
+            providerId,
+            providerLabel: providerDisplay,
+            personalityId,
+            personalityName
+          }
+        );
+      } else {
+        updateActiveSessionContext2(workspaceFolder, {
+          ...buildSessionIdentity2(workspaceFolder, providerDisplay, {
+            providerId,
+            providerLabel: providerDisplay,
+            personalityId,
+            personalityName
+          }),
+          goal: toSingleLine2(handoff?.summary) || "Continue queued work"
+        });
+      }
+      const instruction = buildHandoffExecutionInstruction2(handoff);
+      const assembledPrompt = personality ? assembleAgentPrompt2(personality, instruction, { contextFiles: handoff?.files || [] }) : ["# Task", "", instruction].join("\n");
+      const delivery = await deliverPrompt2("clipboard", { vscodeEnv: vscode2.env }, assembledPrompt);
+      updateHandoffPromptCopiedFlag2(workspaceFolder, handoff?.handoff_id, delivery.ok);
+      if (delivery.ok) {
+        const suffix = personalityName ? ` Personality: ${personalityName}.` : "";
+        vscode2.window.showInformationMessage(
+          `AgentSync: Next step prepared for ${providerDisplay}.${suffix} Prompt copied to clipboard.`
+        );
+        return true;
+      }
+      vscode2.window.showErrorMessage("AgentSync: Failed to copy the next-step prompt to clipboard.");
+      return false;
+    }
+    async function handleHandoffAction(workspaceFolder, message, refreshCallback) {
+      const action = String(message?.action || "").trim();
+      const handoffId = toSingleLine2(message?.handoffId);
+      const personalityId = toSingleLine2(message?.personalityId) || null;
+      if (!action || !handoffId) return;
+      const state = readStateFile2(workspaceFolder) || {};
+      const activeProvider = getSessionProviderInfo2(state?.activeSession || null);
+      const lastProvider = getSessionProviderInfo2(state?.lastSession || null);
+      const currentProvider = activeProvider.label !== "Unknown" ? activeProvider.label : lastProvider.label;
+      if (action === "claim") {
+        if (!currentProvider || currentProvider === "Unknown") {
+          vscode2.window.showErrorMessage("No active provider identity found to claim handoff.");
+          return;
+        }
+        const result = claimHandoffRecord2(workspaceFolder, handoffId, currentProvider);
+        if (result.ok) {
+          syncTrackerHandoffsSection2(workspaceFolder);
+          vscode2.window.showInformationMessage(`AgentSync: Claimed handoff ${handoffId}.`);
+          if (refreshCallback) refreshCallback();
+        } else {
+          vscode2.window.showWarningMessage(
+            `AgentSync: Could not claim ${handoffId} (${result.reason || "unknown reason"}).`
+          );
         }
         return;
       }
-      if (message?.type === "handoff-action") {
-        const workspaceFolder = getActiveWorkspaceFolder();
-        if (!workspaceFolder) return;
-        await handleHandoffAction(workspaceFolder, message.action, message.handoffId, this.context);
-        this.refresh();
+      const { handoffs } = readHandoffs2(workspaceFolder);
+      const handoff = handoffs.find((entry) => toSingleLine2(entry?.handoff_id) === handoffId);
+      if (!handoff) {
+        vscode2.window.showErrorMessage(`AgentSync: Handoff ${handoffId} not found.`);
         return;
       }
-      const command = String(message?.command || "");
-      if (!command) return;
-      if (command === "agentsync.refreshPanel") {
-        this.postAction("started", command);
-        this.refresh();
-        this.postAction("completed", command);
+      if (action === "start") {
+        let providerLabel = currentProvider;
+        if (!state?.sessionActive) {
+          providerLabel = await promptForAgent2(currentProvider || "Codex");
+          if (!providerLabel) return;
+        }
+        await runHandoffStep2(workspaceFolder, handoff, providerLabel, {
+          ensureSession: !state?.sessionActive,
+          personalityId
+        });
+        if (refreshCallback) refreshCallback();
         return;
       }
-      this.postAction("started", command);
-      try {
-        await vscode.commands.executeCommand(command);
-        this.postAction("completed", command);
-      } catch (err) {
-        const msg = err && err.message ? err.message : "Unknown error";
-        this.postAction("failed", command, msg);
+      if (action === "skip") {
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const updated = handoffs.map((entry) => {
+          if (toSingleLine2(entry?.handoff_id) !== handoffId) return entry;
+          return {
+            ...entry,
+            status: "blocked",
+            updated_at: now,
+            state_history: [
+              ...Array.isArray(entry.state_history) ? entry.state_history : [],
+              {
+                status: "blocked",
+                agent: canonicalAgentId2(currentProvider),
+                timestamp: now,
+                reason: "skipped via dashboard"
+              }
+            ]
+          };
+        });
+        writeHandoffs2(workspaceFolder, { version: 1, handoffs: updated });
+        syncTrackerHandoffsSection2(workspaceFolder);
+        vscode2.window.showInformationMessage(`AgentSync: Handoff ${handoffId} marked as skipped.`);
+        if (refreshCallback) refreshCallback();
       }
-      this.refresh();
-    });
-    webviewView.onDidDispose(() => {
-      if (this.view === webviewView) this.view = null;
-    });
-    this.refresh();
+    }
+    module2.exports = { handleHandoffAction };
   }
-};
-async function handleHandoffAction(workspaceFolder, action, handoffId, context) {
+});
+
+// src/dashboard/DashboardProvider.js
+var require_DashboardProvider = __commonJS({
+  "src/dashboard/DashboardProvider.js"(exports2, module2) {
+    "use strict";
+    var vscode2 = require("vscode");
+    var { getDashboardModel } = require_dashboardModel();
+    var { getDashboardHtml } = require_dashboardHtml();
+    var { handleHandoffAction } = require_handoffActions();
+    var AgentSyncDashboardViewProvider2 = class {
+      constructor(context) {
+        this._context = context;
+        this._view = null;
+        this._viewMode = context.globalState.get("agentsync.dashboard.viewMode", "compact");
+        this._lastRefresh = 0;
+      }
+      resolveWebviewView(webviewView, _context, _token) {
+        this._view = webviewView;
+        const workspaceFolder = vscode2.workspace.workspaceFolders?.[0];
+        webviewView.webview.options = {
+          enableScripts: true,
+          localResourceRoots: [this._context.extensionUri]
+        };
+        webviewView.webview.html = getDashboardHtml(webviewView.webview, this._context.extensionUri);
+        webviewView.webview.onDidReceiveMessage((message) => {
+          switch (message.type) {
+            case "refresh":
+              this.refresh();
+              break;
+            case "setMode":
+              this.setViewMode(message.mode);
+              break;
+            case "runCommand":
+              if (message.command) vscode2.commands.executeCommand(message.command);
+              break;
+            case "handoffAction":
+              if (workspaceFolder) {
+                handleHandoffAction(workspaceFolder, message, () => this.refresh());
+              }
+              break;
+            case "openFile":
+              if (message.file && workspaceFolder) {
+                const uri = vscode2.Uri.joinPath(workspaceFolder.uri, message.file);
+                vscode2.window.showTextDocument(uri);
+              }
+              break;
+          }
+        });
+        webviewView.onDidChangeVisibility(() => {
+          if (webviewView.visible) this.refresh();
+        });
+        this.refresh();
+      }
+      refresh() {
+        if (!this._view) return;
+        const now = Date.now();
+        if (now - this._lastRefresh < 250) return;
+        this._lastRefresh = now;
+        const workspaceFolder = vscode2.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+          this._view.webview.postMessage({ type: "update", data: { hasWorkspace: false } });
+          return;
+        }
+        try {
+          const data = getDashboardModel(workspaceFolder, this._viewMode);
+          this._view.webview.postMessage({ type: "update", data });
+        } catch (err) {
+          console.error("[AgentSync] dashboard refresh error:", err);
+          this._view.webview.postMessage({
+            type: "update",
+            data: { hasWorkspace: true, error: err.message }
+          });
+        }
+      }
+      setViewMode(mode) {
+        this._viewMode = mode === "full" ? "full" : "compact";
+        this._context.globalState.update("agentsync.dashboard.viewMode", this._viewMode);
+        this.refresh();
+      }
+    };
+    AgentSyncDashboardViewProvider2.viewType = "agentsync.dashboard";
+    module2.exports = { AgentSyncDashboardViewProvider: AgentSyncDashboardViewProvider2 };
+  }
+});
+
+// src/extension.js
+var vscode = require("vscode");
+var fs = require("fs");
+var path = require("path");
+var utils = require_utils();
+var SessionManager = require_SessionManager();
+var { AgentSyncDashboardViewProvider } = require_DashboardProvider();
+var {
+  // constants
+  PLACEHOLDER,
+  DEFAULT_STALE_HOURS,
+  OPEN_HANDOFF_STATUSES,
+  DEFAULT_END_SESSION_ZERO_TOUCH,
+  DEFAULT_START_SESSION_ZERO_TOUCH,
+  ROLE_LIST,
+  EXECUTION_PROVIDER_DEFS,
+  EXECUTION_PROVIDER_BY_ID,
+  // paths
+  getTemplatesDir,
+  getTrackerPath,
+  getConfigPath,
+  getAgentSyncDir,
+  getStatePath,
+  getRequestPath,
+  getResultPath,
+  getHandoffsPath,
+  getContextCapsulePath,
+  // text
+  isEmptyValue,
+  escapeRegExp,
+  parseTracker,
+  getSectionBody,
+  setSectionBody,
+  canonicalAgentId,
+  toSingleLine,
+  formatElapsed,
+  // io
+  parseISODate,
+  parseCommandArgv,
+  // git
+  runGit,
+  runGitExitCode,
+  normalizeRepoRelativePath,
+  scoreNextTaskCapabilities,
+  getHotFilesCached,
+  // workspace
+  getActiveWorkspaceFolder,
+  resolveWorkspaceFolder,
+  getWorkspaceLabelPrefix,
+  readAgentSyncConfig,
+  writeConfigFile,
+  // snapshot
+  getWorkspaceSnapshot,
+  invalidateWorkspaceCaches,
+  // agent catalog
+  buildCatalog,
+  mapAgentToCapabilities,
+  matchAgentsByCapabilities,
+  // execution channels
+  assembleAgentPrompt,
+  deliverPrompt,
+  injectPersonalityToWorkspace,
+  // session
+  buildSessionIdentity,
+  // automation
+  buildDeterministicSessionSummary,
+  resolveAutomationRoute,
+  buildAutomationHandoffNotes,
+  // health
+  runHealthChecks,
+  resolveHealthCheckProgram,
+  // handoffs
+  validateHandoff,
+  claimHandoffRecord,
+  completeHandoffRecord,
+  syncTrackerHandoffsSection,
+  generateContextCapsule,
+  readTracker,
+  readStateFile,
+  writeStateFile,
+  readHandoffs,
+  writeHandoffs,
+  normalizeHandoffStatus,
+  buildHandoffId,
+  getHandoffOwners,
+  listHandoffRecords,
+  createHandoffRecord,
+  listRunnableQueuedHandoffs
+} = utils;
+var _agentCatalog = null;
+var _extensionPath = null;
+async function promptForRole(prefillRole) {
+  const picks = ROLE_LIST.map((r) => ({
+    label: r.replace(/_/g, " "),
+    description: "",
+    role: r
+  }));
+  if (prefillRole) {
+    const match = picks.find((p) => p.role === prefillRole);
+    if (match) return match.role;
+  }
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: "Select your primary role for this project",
+    ignoreFocusOut: true
+  });
+  return selected?.role || null;
+}
+function applyRolePreset(workspaceFolder, role) {
+  if (!ROLE_LIST.includes(role)) return;
+  const root = workspaceFolder.uri.fsPath;
+  let preset = null;
+  try {
+    const rolesDir = path.join(__dirname, "templates", "roles");
+    const raw = fs.readFileSync(path.join(rolesDir, `${role}.json`), "utf8");
+    preset = JSON.parse(raw);
+  } catch {
+  }
+  if (!preset) return;
+  const cfg = readAgentSyncConfig(workspaceFolder);
+  cfg.userProfile = { role };
+  if (Array.isArray(preset.dashboardShortcuts)) {
+    cfg.dashboardShortcuts = preset.dashboardShortcuts;
+  }
+  if (typeof preset.sessionDurationWarningMinutes === "number") {
+    cfg.sessionDurationWarningMinutes = preset.sessionDurationWarningMinutes;
+  }
+  if (preset.handoffRoutingDefaults) {
+    cfg.automation = cfg.automation || {};
+    cfg.automation.handoffRoutingDefaults = preset.handoffRoutingDefaults;
+  }
+  writeConfigFile(workspaceFolder, cfg);
+  const appendBlock = (filePath, text) => {
+    let content = "";
+    try {
+      content = fs.readFileSync(filePath, "utf8");
+    } catch {
+    }
+    content = content.replace(/## Role:[\s\S]*?(?=\n## |$)/g, "");
+    content += "\n\n## Role: " + role.replace(/_/g, " ") + "\n\n" + text + "\n";
+    fs.writeFileSync(filePath, content, "utf8");
+  };
+  if (preset.agentInstructionBlock) {
+    appendBlock(path.join(root, "CLAUDE.md"), preset.agentInstructionBlock);
+    appendBlock(path.join(root, "AGENTS.md"), preset.agentInstructionBlock);
+    appendBlock(path.join(root, ".github", "copilot-instructions.md"), preset.agentInstructionBlock);
+  }
+}
+function ensureHandoffsFile(workspaceFolder) {
+  try {
+    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
+    const handoffsPath = getHandoffsPath(workspaceFolder);
+    if (!fs.existsSync(handoffsPath)) {
+      fs.writeFileSync(handoffsPath, JSON.stringify({ version: 1, handoffs: [] }, null, 2), "utf8");
+      invalidateWorkspaceCaches(workspaceFolder);
+    }
+  } catch (err) {
+    if (err && err.code !== "ENOENT") console.error("[AgentSync] ensureHandoffsFile error:", err);
+  }
+}
+function getSessionStaleInfo(state, autoStaleSessionMinutes = 0) {
+  if (!state?.sessionActive || !state?.activeSession?.startedAt) {
+    return { isStale: false, ageMs: null, thresholdMs: null };
+  }
+  if (!Number.isFinite(autoStaleSessionMinutes) || autoStaleSessionMinutes <= 0) {
+    return { isStale: false, ageMs: null, thresholdMs: null };
+  }
+  const started = parseISODate(state.activeSession.startedAt);
+  if (!Number.isFinite(started)) {
+    return { isStale: false, ageMs: null, thresholdMs: autoStaleSessionMinutes * 60 * 1e3 };
+  }
+  const ageMs = Date.now() - started;
+  const thresholdMs = autoStaleSessionMinutes * 60 * 1e3;
+  return { isStale: ageMs >= thresholdMs, ageMs, thresholdMs };
+}
+function getOperationalState(state, inProgressLines, handoffs, autoStaleSessionMinutes = 0) {
+  const staleInfo = getSessionStaleInfo(state, autoStaleSessionMinutes);
+  if (state?.sessionActive) {
+    if (staleInfo.isStale) {
+      const ageLabel = staleInfo.ageMs != null ? formatElapsed(staleInfo.ageMs) : "unknown duration";
+      return {
+        key: "waiting",
+        label: "Waiting",
+        reason: `Active session appears stale (running ${ageLabel}). End or clear it before new work.`
+      };
+    }
+    return {
+      key: "busy",
+      label: "Busy",
+      reason: 'An active session flag exists. If stale, use "Clear Active Session".'
+    };
+  }
+  const openHandoffs2 = handoffs.filter(
+    (h) => OPEN_HANDOFF_STATUSES.has(String(h?.status || "").toLowerCase())
+  );
+  if (inProgressLines.length > 0 || openHandoffs2.length > 0) {
+    return {
+      key: "waiting",
+      label: "Waiting",
+      reason: "No active session, but pending work/handoffs exist."
+    };
+  }
+  return { key: "ready", label: "Ready", reason: "No active session and no pending queue." };
+}
+function getStatePulseFrame(stateKey) {
+  const now = Math.floor(Date.now() / 700);
+  if (stateKey === "busy") {
+    const frames = ["[01]", "[10]", "[11]", "[00]"];
+    return frames[now % frames.length];
+  }
+  if (stateKey === "waiting") {
+    const frames = ["[.]", "[..]", "[...]"];
+    return frames[now % frames.length];
+  }
+  return "[idle]";
+}
+async function openTrackerDocument(workspaceFolder) {
+  const trackerPath = getTrackerPath(workspaceFolder);
+  const doc = await vscode.workspace.openTextDocument(trackerPath);
+  await vscode.window.showTextDocument(doc);
+}
+async function openAgentSyncDashboard() {
+  try {
+    await vscode.commands.executeCommand("agentsync.dashboard.focus");
+    return true;
+  } catch {
+  }
+  try {
+    await vscode.commands.executeCommand("workbench.view.extension.agentsync");
+    await vscode.commands.executeCommand("agentsync.dashboard.focus");
+    return true;
+  } catch {
+  }
+  return false;
+}
+async function openAgentSyncPanel() {
+  const dashboardOpened = await openAgentSyncDashboard();
+  if (dashboardOpened) return true;
+  try {
+    await vscode.commands.executeCommand("agentsync.panel.focus");
+    return true;
+  } catch {
+  }
+  try {
+    await vscode.commands.executeCommand("workbench.view.extension.agentsync");
+    await vscode.commands.executeCommand("agentsync.panel.focus");
+    return true;
+  } catch {
+  }
+  return false;
+}
+async function openAgentSyncTutorial(context) {
+  const manifest = context?.extension?.packageJSON || {};
+  const publisher = String(manifest.publisher || "teambotics");
+  const name = String(manifest.name || "agentsync");
+  const extensionId = `${publisher}.${name}`.toLowerCase();
+  const walkthroughId = `${extensionId}#agentsync.gettingStarted`;
+  try {
+    await vscode.commands.executeCommand("workbench.action.openWalkthrough", walkthroughId, false);
+    return true;
+  } catch {
+  }
+  try {
+    await vscode.commands.executeCommand("workbench.action.openWalkthroughs");
+    return true;
+  } catch {
+  }
+  return false;
+}
+async function openAgentSyncDocs(context) {
+  const manifest = context?.extension?.packageJSON || {};
+  const target = String(manifest.homepage || manifest.repository?.url || "").trim();
+  if (!target) return false;
+  try {
+    await vscode.env.openExternal(vscode.Uri.parse(target));
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function ensureTrackerExists(context, workspaceFolder) {
+  const trackerPath = getTrackerPath(workspaceFolder);
+  if (fs.existsSync(trackerPath)) return true;
+  const choice = await vscode.window.showWarningMessage(
+    `AgentTracker.md not found in "${workspaceFolder.name}". Initialize this workspace first?`,
+    "Initialize",
+    "Cancel"
+  );
+  if (choice !== "Initialize") return false;
+  await initWorkspace(context, workspaceFolder);
+  return fs.existsSync(trackerPath);
+}
+function writeResultFile(workspaceFolder, data) {
+  try {
+    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true });
+    fs.writeFileSync(getResultPath(workspaceFolder), JSON.stringify(data, null, 2), "utf8");
+  } catch {
+  }
+}
+function getTrackerWarnings(workspaceFolder, tracker) {
+  const warnings = [];
+  const config = readAgentSyncConfig(workspaceFolder);
+  if (!isEmptyValue(tracker.date)) {
+    const parsed = Date.parse(tracker.date);
+    if (Number.isFinite(parsed)) {
+      const ageMs = Date.now() - parsed;
+      if (ageMs > config.staleAfterHours * 60 * 60 * 1e3) {
+        const ageHours = Math.floor(ageMs / (60 * 60 * 1e3));
+        warnings.push(`Tracker is stale (${ageHours}h old).`);
+      }
+    }
+  }
+  const currentBranch = runGit(workspaceFolder, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (currentBranch && !isEmptyValue(tracker.branch) && tracker.branch !== currentBranch) {
+    warnings.push(`Branch mismatch: tracker=${tracker.branch}, current=${currentBranch}.`);
+  }
+  if (!isEmptyValue(tracker.commit)) {
+    const exitCode = runGitExitCode(workspaceFolder, [
+      "merge-base",
+      "--is-ancestor",
+      tracker.commit,
+      "HEAD"
+    ]);
+    if (exitCode !== 0) {
+      warnings.push(`Tracker commit ${tracker.commit} is not in current HEAD history.`);
+    }
+  }
+  return warnings;
+}
+function getExecutionProvider(value) {
+  const normalized = canonicalAgentId(value);
+  if (!normalized) return null;
+  return EXECUTION_PROVIDER_BY_ID[normalized] || null;
+}
+function getExecutionProviderId(value) {
+  if (isEmptyValue(String(value || ""))) return null;
+  return getExecutionProvider(value)?.id || canonicalAgentId(value) || null;
+}
+function getExecutionProviderLabel(value) {
+  if (isEmptyValue(String(value || ""))) return null;
+  const provider = getExecutionProvider(value);
+  if (provider) return provider.label;
+  const text = String(value || "").trim();
+  return text || null;
+}
+function getSessionProviderInfo(session, fallback = null) {
+  const providerId = canonicalAgentId(session?.provider_id || "") || getExecutionProviderId(session?.provider_label || "") || getExecutionProviderId(session?.agent || "") || getExecutionProviderId(fallback);
+  const providerLabel = getExecutionProviderLabel(session?.provider_label || "") || getExecutionProviderLabel(session?.agent || "") || getExecutionProviderLabel(fallback) || "Unknown";
+  return { id: providerId, label: providerLabel };
+}
+function getPersonalityDisplayName(workspaceFolder, personalityId) {
+  const normalized = canonicalAgentId(personalityId);
+  if (!normalized) return null;
+  try {
+    const catalog = getAgentCatalog(workspaceFolder);
+    const match = catalog?.agents?.find((agent) => canonicalAgentId(agent.id) === normalized);
+    return match?.name || null;
+  } catch {
+    return null;
+  }
+}
+function getSessionPersonalityInfo(workspaceFolder, session) {
+  const personalityId = canonicalAgentId(session?.personality_id || "") || canonicalAgentId(session?.agent_personality_id || "") || null;
+  const personalityName = String(session?.personality_name || "").trim() || getPersonalityDisplayName(workspaceFolder, personalityId) || "None";
+  return { id: personalityId, name: personalityName };
+}
+async function promptForAgent(defaultAgent) {
+  const defaultLabel = getExecutionProviderLabel(defaultAgent) || "Codex";
+  const builtIn = EXECUTION_PROVIDER_DEFS.map((provider) => ({
+    label: provider.label,
+    description: provider.label === defaultLabel ? "default" : void 0
+  }));
+  const choice = await vscode.window.showQuickPick(
+    [...builtIn, { label: "Other" }],
+    { placeHolder: "Select the execution provider for this session" }
+  );
+  if (!choice) return null;
+  if (choice.label !== "Other") return choice.label;
+  const custom = await vscode.window.showInputBox({
+    prompt: "Enter provider name",
+    value: defaultLabel !== "Codex" ? defaultLabel : ""
+  });
+  if (custom === void 0) return null;
+  const trimmed = custom.trim();
+  return trimmed || null;
+}
+async function promptAutomationFallbackRouting(hotFileCount) {
+  const modeChoice = await vscode.window.showQuickPick(
+    [
+      { label: "single", description: "Route to one target agent" },
+      { label: "shared", description: "Route to exactly two agents" },
+      { label: "auto", description: "Route by required capabilities" },
+      { label: "skip", description: "Skip creating a handoff record for now" }
+    ],
+    {
+      placeHolder: `${hotFileCount} hot file(s) detected. Select fallback routing mode.`,
+      ignoreFocusOut: true
+    }
+  );
+  if (!modeChoice) return null;
+  const selected = modeChoice.label;
+  if (selected === "skip") {
+    return {
+      handoffData: {
+        no_handoff_reason: "Zero-touch fallback selected skip.",
+        automation_context: "fallback:skip"
+      },
+      automationContext: "fallback:skip"
+    };
+  }
+  const inputPrompt = selected === "single" ? "Fallback target agent (single owner)" : selected === "shared" ? "Fallback target agents (comma-separated, exactly two)" : "Fallback required capabilities (comma-separated)";
+  const rawInput = await vscode.window.showInputBox({
+    prompt: inputPrompt,
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const parts = String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
+      if (selected === "single")
+        return parts.length === 1 ? null : "Enter exactly one target agent.";
+      if (selected === "shared")
+        return parts.length === 2 ? null : "Enter exactly two target agents.";
+      return parts.length > 0 ? null : "Enter at least one capability.";
+    }
+  });
+  if (rawInput === void 0) return null;
+  const values = rawInput.split(",").map((v) => v.trim()).filter(Boolean);
+  if (selected === "single") {
+    return {
+      handoffData: {
+        owner_mode: "single",
+        to_agents: [canonicalAgentId(values[0])],
+        required_capabilities: [],
+        no_handoff_reason: null,
+        automation_context: "fallback:single"
+      },
+      automationContext: "fallback:single"
+    };
+  }
+  if (selected === "shared") {
+    return {
+      handoffData: {
+        owner_mode: "shared",
+        to_agents: values.slice(0, 2).map((v) => canonicalAgentId(v)),
+        required_capabilities: [],
+        no_handoff_reason: null,
+        automation_context: "fallback:shared"
+      },
+      automationContext: "fallback:shared"
+    };
+  }
+  return {
+    handoffData: {
+      owner_mode: "auto",
+      to_agents: [],
+      required_capabilities: values,
+      no_handoff_reason: null,
+      automation_context: "fallback:auto"
+    },
+    automationContext: "fallback:auto"
+  };
+}
+async function copyHandoffPromptToClipboard(promptLines) {
+  if (!Array.isArray(promptLines) || promptLines.length === 0) return false;
+  if (promptLines.length === 1) {
+    await vscode.env.clipboard.writeText(promptLines[0]);
+    return true;
+  }
+  const picks = promptLines.map((line, index) => ({
+    label: `Prompt ${index + 1}`,
+    description: line,
+    line
+  }));
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: "Select which handoff prompt to copy",
+    ignoreFocusOut: true
+  });
+  if (!selected) return false;
+  await vscode.env.clipboard.writeText(selected.line);
+  return true;
+}
+function updateHandoffPromptCopiedFlag(workspaceFolder, handoffId, copied) {
   const normalizedId = toSingleLine(handoffId);
   if (!normalizedId) return;
-  const state = readStateFile(workspaceFolder) || {};
-  const activeProvider = getSessionProviderInfo(state?.activeSession || null);
-  const lastProvider = getSessionProviderInfo(state?.lastSession || null);
-  const currentProvider = activeProvider.label !== "Unknown" ? activeProvider.label : lastProvider.label;
-  if (action === "claim") {
-    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentProvider);
-    if (result.ok) {
-      syncTrackerHandoffsSection(workspaceFolder);
-      vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`);
-    } else {
-      vscode.window.showWarningMessage(
-        `AgentSync: Could not claim ${normalizedId} (${result.reason || "unknown reason"}).`
+  const store = readHandoffs(workspaceFolder);
+  if (!store.handoffs.length) return;
+  const next = store.handoffs.map((handoff) => {
+    if (toSingleLine(handoff?.handoff_id) !== normalizedId) return handoff;
+    return {
+      ...handoff,
+      prompt_copied_to_clipboard: copied === true,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  });
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: next });
+}
+function findClaimableHandoff(workspaceFolder, agentId) {
+  const canonical = canonicalAgentId(agentId);
+  if (!canonical) return null;
+  const { handoffs } = readHandoffs(workspaceFolder);
+  return handoffs.find((h) => {
+    if (String(h?.status || "").toLowerCase() !== "queued") return false;
+    const owners = utils.getHandoffOwners(h);
+    return owners.length === 0 || owners.includes(canonical);
+  }) || null;
+}
+function getAgencySyncPaths(workspaceFolder) {
+  const base = path.join(workspaceFolder.uri.fsPath, ".agencysync");
+  return {
+    base,
+    runs: path.join(base, "runs.json"),
+    events: path.join(base, "events")
+  };
+}
+function tryReadJson(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function listJsonFilesRecursive(dirPath) {
+  if (!fs.existsSync(dirPath)) return [];
+  const files = [];
+  const walk = (current) => {
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) files.push(full);
+    }
+  };
+  walk(dirPath);
+  return files;
+}
+function normalizeAgencyCandidate(raw, meta = {}) {
+  if (!raw || typeof raw !== "object") return null;
+  const toAgents = Array.isArray(raw.to_agents || raw.owners || raw.assignees) ? raw.to_agents || raw.owners || raw.assignees : [];
+  const requiredCaps = Array.isArray(raw.required_capabilities || raw.capabilities) ? raw.required_capabilities || raw.capabilities : [];
+  const sourceRunId = toSingleLine(raw.run_id || raw.runId || meta.sourceRunId || "") || null;
+  const sourceEventId = toSingleLine(raw.event_id || raw.eventId || meta.sourceEventId || "") || null;
+  const modeInput = String(raw.owner_mode || "").toLowerCase();
+  const ownerMode = modeInput || (toAgents.length >= 2 ? "shared" : toAgents.length === 1 ? "single" : "auto");
+  const normalizedMode = ownerMode === "single" || ownerMode === "shared" || ownerMode === "auto" ? ownerMode : "auto";
+  return {
+    handoff_id: toSingleLine(raw.handoff_id || raw.handoffId || ""),
+    task_id: toSingleLine(raw.task_id || raw.taskId || raw.id || ""),
+    from_agent: canonicalAgentId(raw.from_agent || raw.agent || raw.source_agent || "agency"),
+    to_agents: toAgents.map((a) => canonicalAgentId(a)).filter(Boolean),
+    owner_mode: normalizedMode,
+    status: normalizeHandoffStatus(raw.status || raw.state, "queued"),
+    required_capabilities: requiredCaps.map((c) => toSingleLine(c)).filter(Boolean),
+    summary: toSingleLine(raw.summary || raw.title || raw.message || ""),
+    notes: toSingleLine(raw.notes || raw.description || ""),
+    files: Array.isArray(raw.files || raw.changed_files) ? (raw.files || raw.changed_files).map((f) => toSingleLine(f)).filter(Boolean) : [],
+    branch: toSingleLine(raw.branch || ""),
+    commit: toSingleLine(raw.commit || raw.sha || ""),
+    no_handoff_reason: toSingleLine(raw.no_handoff_reason || "") || null,
+    source_system: "agencysync",
+    source_run_id: sourceRunId,
+    source_event_id: sourceEventId
+  };
+}
+function syncAgencyRunsCore(workspaceFolder) {
+  const paths = getAgencySyncPaths(workspaceFolder);
+  const errors = [];
+  if (!fs.existsSync(paths.base)) {
+    return { synced: 0, created: 0, updated: 0, errors };
+  }
+  const candidates = [];
+  const runsData = tryReadJson(paths.runs);
+  if (Array.isArray(runsData)) {
+    runsData.forEach((run, index) => {
+      const candidate = normalizeAgencyCandidate(run, {
+        sourceRunId: toSingleLine(run?.id || run?.run_id || index + 1) || null
+      });
+      if (candidate) candidates.push(candidate);
+    });
+  }
+  const eventFiles = listJsonFilesRecursive(paths.events);
+  for (const filePath of eventFiles) {
+    const eventData = tryReadJson(filePath);
+    const sourceEventId = path.relative(paths.events, filePath).replace(/\\/g, "/");
+    const rows = Array.isArray(eventData) ? eventData : eventData ? [eventData] : [];
+    rows.forEach((row, index) => {
+      const candidate = normalizeAgencyCandidate(row, {
+        sourceEventId: `${sourceEventId}#${index + 1}`,
+        sourceRunId: toSingleLine(row?.run_id || row?.runId || "") || null
+      });
+      if (candidate) candidates.push(candidate);
+    });
+  }
+  if (candidates.length === 0) {
+    const state2 = readStateFile(workspaceFolder) || {};
+    const integration2 = {
+      ...state2.integration && typeof state2.integration === "object" ? state2.integration : {},
+      lastAgencySyncAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    writeStateFile(workspaceFolder, { ...state2, integration: integration2, lastUpdated: (/* @__PURE__ */ new Date()).toISOString() });
+    return { synced: 0, created: 0, updated: 0, errors };
+  }
+  const store = readHandoffs(workspaceFolder);
+  let created = 0;
+  let updatedCount = 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const next = [...store.handoffs];
+  const resolveExistingIndex = (candidate) => {
+    const cid = toSingleLine(candidate.handoff_id);
+    if (cid) {
+      const byId = next.findIndex((h) => toSingleLine(h?.handoff_id) === cid);
+      if (byId >= 0) return byId;
+    }
+    if (candidate.source_event_id) {
+      const byEvent = next.findIndex((h) => toSingleLine(h?.source_event_id) === candidate.source_event_id);
+      if (byEvent >= 0) return byEvent;
+    }
+    if (candidate.source_run_id && candidate.task_id) {
+      const byRunTask = next.findIndex(
+        (h) => toSingleLine(h?.source_run_id) === candidate.source_run_id && toSingleLine(h?.task_id) === candidate.task_id
       );
+      if (byRunTask >= 0) return byRunTask;
     }
-  } else if (action === "start") {
-    const { handoffs } = readHandoffs(workspaceFolder);
-    const handoff = handoffs.find((h) => toSingleLine(h?.handoff_id) === normalizedId);
-    if (!handoff) return;
-    let providerLabel = currentProvider;
-    if (!state?.sessionActive) {
-      providerLabel = await promptForAgent(currentProvider || "Codex");
-      if (!providerLabel) return;
-    }
-    await runHandoffStep(workspaceFolder, handoff, providerLabel, {
-      ensureSession: !state?.sessionActive
-    });
-  } else if (action === "skip") {
-    const store = readHandoffs(workspaceFolder);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const updated = store.handoffs.map((h) => {
-      if (toSingleLine(h?.handoff_id) !== normalizedId) return h;
-      return {
-        ...h,
-        status: "blocked",
-        updated_at: now,
-        state_history: [
-          ...Array.isArray(h.state_history) ? h.state_history : [],
-          {
-            status: "blocked",
-            agent: canonicalAgentId(currentProvider),
-            timestamp: now,
-            reason: "skipped via dashboard"
+    return -1;
+  };
+  for (const candidate of candidates) {
+    try {
+      const idx = resolveExistingIndex(candidate);
+      if (idx >= 0) {
+        const existing = next[idx];
+        const merged = {
+          ...existing,
+          ...candidate,
+          handoff_id: toSingleLine(existing.handoff_id || candidate.handoff_id || "") || buildHandoffId(next, now),
+          task_id: toSingleLine(existing.task_id || candidate.task_id) || null,
+          from_agent: canonicalAgentId(candidate.from_agent || existing.from_agent || "agency"),
+          to_agents: Array.isArray(candidate.to_agents) && candidate.to_agents.length > 0 ? candidate.to_agents : Array.isArray(existing.to_agents) ? existing.to_agents : [],
+          owner_mode: candidate.owner_mode || existing.owner_mode || (Array.isArray(candidate.to_agents) && candidate.to_agents.length >= 2 ? "shared" : Array.isArray(candidate.to_agents) && candidate.to_agents.length === 1 ? "single" : "auto"),
+          required_capabilities: Array.isArray(candidate.required_capabilities) && candidate.required_capabilities.length > 0 ? candidate.required_capabilities : Array.isArray(existing.required_capabilities) ? existing.required_capabilities : [],
+          summary: candidate.summary || existing.summary || "Agency handoff",
+          notes: candidate.notes || existing.notes || "",
+          updated_at: now,
+          created_at: existing.created_at || now,
+          state_history: [
+            ...Array.isArray(existing.state_history) ? existing.state_history : [],
+            {
+              status: normalizeHandoffStatus(candidate.status || existing.status, "queued"),
+              agent: canonicalAgentId(candidate.from_agent || existing.from_agent || "agency"),
+              timestamp: now,
+              reason: "synced from .agencysync"
+            }
+          ]
+        };
+        if (merged.no_handoff_reason) {
+          merged.owner_mode = "auto";
+          merged.to_agents = [];
+          if (!Array.isArray(merged.required_capabilities) || merged.required_capabilities.length === 0) {
+            merged.required_capabilities = ["skip-handoff"];
           }
-        ]
-      };
+        } else if (merged.owner_mode === "auto" && merged.required_capabilities.length === 0) {
+          merged.required_capabilities = ["handoff"];
+        }
+        const validation = validateHandoff(merged);
+        if (!validation.valid) throw new Error(validation.errors.join("; "));
+        next[idx] = merged;
+        updatedCount += 1;
+      } else {
+        const createdRecord = utils.createHandoffRecord(workspaceFolder, {
+          ...candidate,
+          summary: candidate.summary || "Agency handoff",
+          notes: candidate.notes || "",
+          source_system: "agencysync"
+        });
+        next.push(createdRecord);
+        created += 1;
+      }
+    } catch (err) {
+      errors.push(err && err.message ? err.message : "Unknown agency sync error");
+    }
+  }
+  if (updatedCount > 0) {
+    writeHandoffs(workspaceFolder, { version: 1, handoffs: next });
+  }
+  syncTrackerHandoffsSection(workspaceFolder);
+  const state = readStateFile(workspaceFolder) || {};
+  const integration = {
+    ...state.integration && typeof state.integration === "object" ? state.integration : {},
+    lastAgencySyncAt: now
+  };
+  writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: now });
+  return { synced: candidates.length, created, updated: updatedCount, errors };
+}
+function updateActiveSessionContext(workspaceFolder, updates = {}) {
+  const state = readStateFile(workspaceFolder) || {};
+  if (!state?.sessionActive || !state?.activeSession) return null;
+  const nextSession = {
+    ...state.activeSession,
+    ...updates
+  };
+  writeStateFile(workspaceFolder, {
+    ...state,
+    lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+    activeSession: nextSession
+  });
+  return nextSession;
+}
+var _dropZoneInFlight = /* @__PURE__ */ new Set();
+async function processDropZoneRequest(workspaceFolder) {
+  const folderKey = workspaceFolder.uri.fsPath;
+  if (_dropZoneInFlight.has(folderKey)) return;
+  const requestPath = getRequestPath(workspaceFolder);
+  const claimPath = requestPath + ".processing";
+  try {
+    fs.renameSync(requestPath, claimPath);
+  } catch {
+    return;
+  }
+  _dropZoneInFlight.add(folderKey);
+  let request;
+  try {
+    const raw = fs.readFileSync(claimPath, "utf8");
+    request = JSON.parse(raw);
+  } catch {
+    writeResultFile(workspaceFolder, {
+      ok: false,
+      error: "Invalid JSON in request file",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
-    writeHandoffs(workspaceFolder, { version: 1, handoffs: updated });
-    syncTrackerHandoffsSection(workspaceFolder);
-    vscode.window.showInformationMessage(`AgentSync: Handoff ${normalizedId} marked as skipped.`);
+    try {
+      fs.unlinkSync(claimPath);
+    } catch (err) {
+      if (err && err.code !== "ENOENT") console.error("[AgentSync] drop-zone cleanup error:", err);
+    }
+    _dropZoneInFlight.delete(folderKey);
+    return;
+  }
+  const { action } = request || {};
+  const timestamp = (/* @__PURE__ */ new Date()).toISOString();
+  try {
+    switch (action) {
+      case "startSession": {
+        const { agent, goal } = request;
+        if (!agent) throw new Error("Missing required field: agent");
+        SessionManager.startSessionCore(workspaceFolder, agent, goal || "Session started");
+        const state = readStateFile(workspaceFolder);
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1;
+          writeStateFile(workspaceFolder, state);
+        }
+        writeResultFile(workspaceFolder, { ok: true, action, timestamp });
+        break;
+      }
+      case "endSession": {
+        const { agent, summary, nextWork, handoff } = request;
+        if (!agent) throw new Error("Missing required field: agent");
+        const state = readStateFile(workspaceFolder);
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1;
+          writeStateFile(workspaceFolder, state);
+        }
+        const hasProvidedSummary = typeof summary === "string" && toSingleLine(summary).length > 0;
+        const zeroTouchEnabled = readAgentSyncConfig(workspaceFolder).automation?.endSessionZeroTouch?.enabled === true;
+        const {
+          health,
+          hotFiles,
+          handoff: handoffRecord,
+          generatedSummary,
+          summarySource,
+          handoffPrompts
+        } = await SessionManager.endSessionCore(
+          workspaceFolder,
+          agent,
+          summary || "",
+          nextWork || "",
+          handoff || null,
+          {
+            summarySource: !hasProvidedSummary && zeroTouchEnabled ? "deterministic" : "user",
+            automationUsed: zeroTouchEnabled && !hasProvidedSummary
+          }
+        );
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: {
+            health,
+            hotFiles,
+            handoff: handoffRecord,
+            generatedSummary,
+            summarySource,
+            handoffPrompts,
+            promptCopiedToClipboard: false
+          }
+        });
+        break;
+      }
+      case "status": {
+        const content = readTracker(workspaceFolder);
+        const tracker = content ? parseTracker(content) : null;
+        const warnings = tracker ? getTrackerWarnings(workspaceFolder, tracker) : [];
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { tracker, warnings }
+        });
+        break;
+      }
+      case "health": {
+        const { results, outputs } = await runHealthChecks(workspaceFolder);
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { results, outputs }
+        });
+        break;
+      }
+      case "listHandoffs": {
+        const handoffs = utils.listHandoffRecords(workspaceFolder);
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { count: handoffs.length, handoffs }
+        });
+        break;
+      }
+      case "claimHandoff": {
+        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id);
+        const agent = toSingleLine(request?.agent);
+        if (!handoffId) throw new Error("Missing required field: handoffId");
+        if (!agent) throw new Error("Missing required field: agent");
+        const result = claimHandoffRecord(workspaceFolder, handoffId, agent);
+        if (!result.ok) {
+          writeResultFile(workspaceFolder, {
+            ok: false,
+            action,
+            timestamp,
+            error: result.reason || "claim failed",
+            data: result
+          });
+          break;
+        }
+        syncTrackerHandoffsSection(workspaceFolder);
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: result
+        });
+        break;
+      }
+      case "completeHandoff": {
+        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id);
+        const agent = toSingleLine(request?.agent);
+        const status = toSingleLine(request?.status || "merged") || "merged";
+        const reason = toSingleLine(request?.reason || "") || null;
+        if (!handoffId) throw new Error("Missing required field: handoffId");
+        if (!agent) throw new Error("Missing required field: agent");
+        const result = utils.completeHandoffRecord(workspaceFolder, handoffId, status, agent, reason);
+        if (!result.ok) {
+          writeResultFile(workspaceFolder, {
+            ok: false,
+            action,
+            timestamp,
+            error: result.reason || "complete failed",
+            data: result
+          });
+          break;
+        }
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: result
+        });
+        break;
+      }
+      case "createHandoff": {
+        const handoff = request?.handoff;
+        if (!handoff || typeof handoff !== "object") {
+          throw new Error("Missing required field: handoff");
+        }
+        const created = utils.createHandoffRecord(workspaceFolder, handoff);
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { handoff: created }
+        });
+        break;
+      }
+      case "syncAgencyRuns": {
+        const data = syncAgencyRunsCore(workspaceFolder);
+        writeResultFile(workspaceFolder, { ok: true, action, timestamp, data });
+        break;
+      }
+      default:
+        throw new Error(`Unknown action: ${action || "(none)"}`);
+    }
+  } catch (err) {
+    writeResultFile(workspaceFolder, { ok: false, error: err.message, action, timestamp });
+  } finally {
+    try {
+      fs.unlinkSync(claimPath);
+    } catch (err) {
+      if (err && err.code !== "ENOENT") console.error("[AgentSync] drop-zone cleanup error:", err);
+    }
+    _dropZoneInFlight.delete(folderKey);
   }
 }
 var AgentSyncItem = class extends vscode.TreeItem {
@@ -4944,7 +5635,7 @@ var AgentSyncTreeDataProvider = class {
         ]
       });
     }
-    const buckets = getHandoffBuckets(handoffs, currentAgentId, staleAfterHours);
+    const buckets = utils.getHandoffBuckets(handoffs, currentAgentId, staleAfterHours);
     const openHandoffs2 = buckets.open;
     const assignedToMe = buckets.assignedToMe;
     const sharedWithMe = buckets.sharedWithMe;
@@ -4953,14 +5644,14 @@ var AgentSyncTreeDataProvider = class {
       const id = h?.handoff_id || h?.task_id || "unknown";
       const summary = (h?.summary || h?.task_id || "No summary").trim();
       const status = String(h?.status || "queued");
-      const owners = getHandoffOwners(h).join(",");
-      const personality = getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(h));
+      const owners = utils.getHandoffOwners(h).join(",");
+      const personality = getPersonalityDisplayName(workspaceFolder, utils.getHandoffPersonalityId(h));
       return new AgentSyncItem(`${id}: ${summary}`, vscode.TreeItemCollapsibleState.None, {
         icon: "note",
         description: status,
         tooltip: [
           `owners: ${owners || "provider-flex"}`,
-          `personality: ${personality || getHandoffPersonalityId(h) || "auto"}`,
+          `personality: ${personality || utils.getHandoffPersonalityId(h) || "auto"}`,
           `mode: ${h?.owner_mode || "unknown"}`
         ].join("\n"),
         command: { command: "agentsync.openHandoffs", title: "Open Handoffs JSON" }
@@ -5285,8 +5976,8 @@ async function listHandoffsCommand() {
     return;
   }
   ensureHandoffsFile(workspaceFolder);
-  const handoffs = listHandoffRecords(workspaceFolder);
-  const openCount = handoffs.filter((h) => isOpenHandoff(h)).length;
+  const handoffs = utils.listHandoffRecords(workspaceFolder);
+  const openCount = handoffs.filter((h) => utils.isOpenHandoff(h)).length;
   const detail = [
     `Total handoffs: ${handoffs.length}`,
     `Open handoffs: ${openCount}`,
@@ -5308,7 +5999,7 @@ async function claimHandoffCommand() {
   const defaultAgent = toSingleLine(state?.activeSession?.agent) || toSingleLine(state?.lastSession?.agent) || "Codex";
   const agent = await promptForAgent(defaultAgent);
   if (!agent) return;
-  const queued = listHandoffRecords(workspaceFolder).filter(
+  const queued = utils.listHandoffRecords(workspaceFolder).filter(
     (h) => String(h?.status || "").toLowerCase() === "queued"
   );
   if (queued.length === 0) {
@@ -5334,7 +6025,7 @@ async function claimHandoffCommand() {
   }
   syncTrackerHandoffsSection(workspaceFolder);
   vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${selected.label}.`);
-  const handoffRecord = listHandoffRecords(workspaceFolder).find(
+  const handoffRecord = utils.listHandoffRecords(workspaceFolder).find(
     (h) => toSingleLine(h?.handoff_id) === selected.label
   );
   const personalityId = handoffRecord?.agent_personality_id || handoffRecord?.suggested_agent_personality_id;
@@ -5374,7 +6065,7 @@ async function completeHandoffCommand() {
   const defaultAgent = toSingleLine(state?.activeSession?.agent) || toSingleLine(state?.lastSession?.agent) || "Codex";
   const agent = await promptForAgent(defaultAgent);
   if (!agent) return;
-  const candidates = listHandoffRecords(workspaceFolder).filter(
+  const candidates = utils.listHandoffRecords(workspaceFolder).filter(
     (h) => OPEN_HANDOFF_STATUSES.has(String(h?.status || "").toLowerCase())
   );
   if (candidates.length === 0) {
@@ -5411,7 +6102,7 @@ async function completeHandoffCommand() {
     placeHolder: "Example: CI green, merged via PR #123"
   });
   if (reasonInput === void 0) return;
-  const result = completeHandoffRecord(
+  const result = utils.completeHandoffRecord(
     workspaceFolder,
     selected.label,
     statusPick.label,
@@ -5488,7 +6179,7 @@ async function clearActiveSession() {
     "Cancel"
   );
   if (choice !== "Clear Session") return;
-  const result = clearActiveSessionCore(workspaceFolder);
+  const result = SessionManager.clearActiveSessionCore(workspaceFolder);
   if (!result.cleared) {
     vscode.window.showErrorMessage("AgentSync: Could not clear active session.");
     return;
@@ -5570,11 +6261,11 @@ async function startSession(context, options = {}) {
   }
   try {
     const personality = claimedHandoff ? resolveHandoffPersonality(workspaceFolder, claimedHandoff) : null;
-    startSessionCore(workspaceFolder, agent, goal, {
+    SessionManager.startSessionCore(workspaceFolder, agent, goal, {
       providerId: getExecutionProviderId(agent),
       providerLabel: getExecutionProviderLabel(agent),
-      personalityId: personality?.id || getHandoffPersonalityId(claimedHandoff) || null,
-      personalityName: personality?.name || getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(claimedHandoff)) || null
+      personalityId: personality?.id || utils.getHandoffPersonalityId(claimedHandoff) || null,
+      personalityName: personality?.name || getPersonalityDisplayName(workspaceFolder, utils.getHandoffPersonalityId(claimedHandoff)) || null
     });
   } catch (err) {
     vscode.window.showErrorMessage(`AgentSync: ${err.message}`);
@@ -5788,7 +6479,7 @@ async function endSession(context) {
   }
   let result;
   try {
-    result = await endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData, {
+    result = await SessionManager.endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData, {
       hotFiles: precomputedHotFiles,
       healthResults: precomputedHealth,
       healthOutputs: precomputedHealthOutputs,
@@ -6068,7 +6759,7 @@ async function browseAgentsCommand() {
 function resolveHandoffPersonality(workspaceFolder, handoff) {
   const catalog = getAgentCatalog(workspaceFolder);
   if (!catalog || !Array.isArray(catalog.agents) || catalog.agents.length === 0) return null;
-  const explicitId = getHandoffPersonalityId(handoff);
+  const explicitId = utils.getHandoffPersonalityId(handoff);
   if (explicitId) {
     const direct = catalog.agents.find((agent) => canonicalAgentId(agent.id) === explicitId);
     if (direct) return direct;
@@ -6093,19 +6784,6 @@ function buildHandoffExecutionInstruction(handoff) {
   }
   return lines.join("\n");
 }
-function listRunnableQueuedHandoffs(workspaceFolder, providerId = null) {
-  const currentProviderId = canonicalAgentId(providerId);
-  const { handoffs } = readHandoffs(workspaceFolder);
-  return handoffs.filter((handoff) => String(handoff?.status || "").toLowerCase() === "queued").filter((handoff) => {
-    const owners = getHandoffOwners(handoff);
-    return owners.length === 0 || !currentProviderId || owners.includes(currentProviderId);
-  }).sort((a, b) => {
-    const aStep = Number(a?.chain_step || 0);
-    const bStep = Number(b?.chain_step || 0);
-    if (aStep !== bStep) return aStep - bStep;
-    return String(a?.created_at || "").localeCompare(String(b?.created_at || ""));
-  });
-}
 async function runHandoffStep(workspaceFolder, handoff, providerLabel, options = {}) {
   const providerId = getExecutionProviderId(providerLabel);
   const providerDisplay = getExecutionProviderLabel(providerLabel) || String(providerLabel || "Unknown");
@@ -6118,9 +6796,9 @@ async function runHandoffStep(workspaceFolder, handoff, providerLabel, options =
   }
   syncTrackerHandoffsSection(workspaceFolder);
   const personality = resolveHandoffPersonality(workspaceFolder, handoff);
-  const personalityId = personality?.id || getHandoffPersonalityId(handoff) || null;
+  const personalityId = personality?.id || utils.getHandoffPersonalityId(handoff) || null;
   const personalityName = personality?.name || getPersonalityDisplayName(workspaceFolder, personalityId) || null;
-  if (personality && !getHandoffPersonalityId(handoff) && toSingleLine(handoff?.handoff_id)) {
+  if (personality && !utils.getHandoffPersonalityId(handoff) && toSingleLine(handoff?.handoff_id)) {
     const store = readHandoffs(workspaceFolder);
     const next = store.handoffs.map((entry) => {
       if (toSingleLine(entry?.handoff_id) !== toSingleLine(handoff?.handoff_id)) return entry;
@@ -6136,7 +6814,7 @@ async function runHandoffStep(workspaceFolder, handoff, providerLabel, options =
     injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, personality);
   }
   if (options.ensureSession) {
-    startSessionCore(workspaceFolder, providerDisplay, toSingleLine(handoff?.summary), {
+    SessionManager.startSessionCore(workspaceFolder, providerDisplay, toSingleLine(handoff?.summary), {
       providerId,
       providerLabel: providerDisplay,
       personalityId,
@@ -6186,8 +6864,8 @@ async function runNextStepCommand() {
   if (candidates.length > 1) {
     const selection = await vscode.window.showQuickPick(
       candidates.map((item) => {
-        const owners = getHandoffOwners(item);
-        const personalityName = getPersonalityDisplayName(workspaceFolder, getHandoffPersonalityId(item));
+        const owners = utils.getHandoffOwners(item);
+        const personalityName = getPersonalityDisplayName(workspaceFolder, utils.getHandoffPersonalityId(item));
         return {
           label: toSingleLine(item?.handoff_id) || "unknown",
           description: toSingleLine(item?.summary) || "No summary",
@@ -6205,7 +6883,7 @@ async function runNextStepCommand() {
   }
   let providerLabel = activeProvider.label;
   if (!state?.sessionActive) {
-    const ownerDefaults = getHandoffOwners(handoff);
+    const ownerDefaults = utils.getHandoffOwners(handoff);
     const defaultProvider = ownerDefaults[0] || lastProvider.label || "Codex";
     providerLabel = await promptForAgent(defaultProvider);
     if (!providerLabel) return;
@@ -6363,34 +7041,6 @@ async function createPipelineCommand() {
   vscode.window.showInformationMessage(
     "AgentSync: Pipeline created with " + selectedAgents.length + " steps. Chain ID: " + chainId
   );
-}
-function advanceChainOnCompletion(workspaceFolder, completedHandoffId) {
-  const store = readHandoffs(workspaceFolder);
-  const completed = store.handoffs.find(
-    (h) => toSingleLine(h?.handoff_id) === toSingleLine(completedHandoffId)
-  );
-  if (!completed || !completed.chain_id) return;
-  const completedStatus = String(completed.status || "").toLowerCase();
-  const isTerminal = completedStatus === "merged" || completedStatus === "approved" || completedStatus === "ready_for_review";
-  if (!isTerminal) return;
-  const nextStep = completed.chain_step + 1;
-  const nextHandoff = store.handoffs.find(
-    (h) => h.chain_id === completed.chain_id && h.chain_step === nextStep && String(h.status || "").toLowerCase() === "blocked"
-  );
-  if (!nextHandoff) return;
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  nextHandoff.status = "queued";
-  nextHandoff.updated_at = now;
-  nextHandoff.notes = (nextHandoff.notes || "") + " | Previous step completed: " + toSingleLine(completed.summary || "");
-  if (!Array.isArray(nextHandoff.state_history)) nextHandoff.state_history = [];
-  nextHandoff.state_history.push({
-    status: "queued",
-    agent: "system",
-    timestamp: now,
-    reason: "chain auto-advance from " + completedHandoffId
-  });
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: store.handoffs });
-  syncTrackerHandoffsSection(workspaceFolder);
 }
 function activate(context) {
   _extensionPath = context.extensionPath;
@@ -6840,7 +7490,7 @@ if (process.env.NODE_ENV === "test") {
     claimHandoffRecord,
     completeHandoffRecord,
     listHandoffRecords,
-    startSessionCore,
+    startSessionCore: (ws, agent, goal, opts) => SessionManager.startSessionCore(ws, agent, goal, opts),
     listRunnableQueuedHandoffs,
     syncAgencyRunsCore,
     generateContextCapsule,

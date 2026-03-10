@@ -2,11 +2,11 @@
 
 const cp = require('child_process')
 
+const HOT_FILES_CACHE_TTL_MS = 4000
+const _hotFilesCache = new Map()
+
 /**
  * Run a git command and return stdout when successful.
- * @param {import('vscode').WorkspaceFolder} workspaceFolder
- * @param {string[]} args
- * @returns {string | null}
  */
 function runGit(workspaceFolder, args) {
   const result = cp.spawnSync('git', args, {
@@ -20,9 +20,6 @@ function runGit(workspaceFolder, args) {
 
 /**
  * Run a git command and return the exit code.
- * @param {import('vscode').WorkspaceFolder} workspaceFolder
- * @param {string[]} args
- * @returns {number}
  */
 function runGitExitCode(workspaceFolder, args) {
   const result = cp.spawnSync('git', args, {
@@ -36,8 +33,6 @@ function runGitExitCode(workspaceFolder, args) {
 
 /**
  * Detect changed files for Hot Files using git.
- * @param {import('vscode').WorkspaceFolder} workspaceFolder
- * @returns {string[]}
  */
 function detectHotFiles(workspaceFolder) {
   const collected = new Set()
@@ -62,9 +57,30 @@ function detectHotFiles(workspaceFolder) {
 }
 
 /**
+ * Cached version of detectHotFiles with a short TTL.
+ */
+function getHotFilesCached(workspaceFolder, options = {}) {
+  const { force = false } = options
+  const key = workspaceFolder.uri.fsPath
+  const cached = _hotFilesCache.get(key)
+  const now = Date.now()
+
+  if (
+    !force &&
+    cached &&
+    now - cached.fetchedAt <= HOT_FILES_CACHE_TTL_MS &&
+    Array.isArray(cached.files)
+  ) {
+    return cached.files
+  }
+
+  const files = detectHotFiles(workspaceFolder)
+  _hotFilesCache.set(key, { files, fetchedAt: now })
+  return files
+}
+
+/**
  * Normalize a workspace-relative path for stable cross-platform comparisons.
- * @param {string} filePath
- * @returns {string}
  */
 function normalizeRepoRelativePath(filePath) {
   return String(filePath || '')
@@ -75,8 +91,6 @@ function normalizeRepoRelativePath(filePath) {
 
 /**
  * Parse a git diff file header path into a normalized relative path.
- * @param {string} rawPath
- * @returns {string}
  */
 function parseDiffHeaderPath(rawPath) {
   let value = String(rawPath || '').trim()
@@ -90,11 +104,6 @@ function parseDiffHeaderPath(rawPath) {
 
 /**
  * Score the next task's capabilities based on session context and changes.
- * @param {string[]} hotFiles
- * @param {{ file:string, change:string }[]} signatureChanges
- * @param {{ filesModified?:number, commandsRun?:number }} metrics
- * @param {number} priorAttempts
- * @returns {{ tier:'worker'|'lead', capabilities:string[], reason:string }}
  */
 function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, priorAttempts = 0) {
   const caps = []
@@ -116,22 +125,32 @@ function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, pri
     caps.push('heavy edit')
   }
 
-  // Infer domain capabilities from file extensions in hot files
   if (hotFiles && hotFiles.length > 0) {
     const extensions = new Set(
-      hotFiles.map((f) => {
-        const dot = f.lastIndexOf('.')
-        return dot >= 0 ? f.slice(dot).toLowerCase() : ''
-      }).filter(Boolean)
+      hotFiles
+        .map((file) => {
+          const dot = file.lastIndexOf('.')
+          return dot >= 0 ? file.slice(dot).toLowerCase() : ''
+        })
+        .filter(Boolean)
     )
-    const testFiles = hotFiles.filter((f) =>
-      /\.(test|spec|e2e)\./i.test(f) || /\/__tests__\//i.test(f) || /\/test\//i.test(f)
+    const testFiles = hotFiles.filter(
+      (file) =>
+        /\.(test|spec|e2e)\./i.test(file) || /\/__tests__\//i.test(file) || /\/test\//i.test(file)
     )
     if (testFiles.length > 0) caps.push('testing')
-    if (extensions.has('.css') || extensions.has('.scss') || extensions.has('.figma')) caps.push('design')
-    if (extensions.has('.md') || extensions.has('.txt') || extensions.has('.rst')) caps.push('documentation')
-    if (extensions.has('.yml') || extensions.has('.yaml') || extensions.has('.dockerfile') ||
-        hotFiles.some((f) => f.includes('Dockerfile') || f.includes('.github/workflows'))) {
+    if (extensions.has('.css') || extensions.has('.scss') || extensions.has('.figma')) {
+      caps.push('design')
+    }
+    if (extensions.has('.md') || extensions.has('.txt') || extensions.has('.rst')) {
+      caps.push('documentation')
+    }
+    if (
+      extensions.has('.yml') ||
+      extensions.has('.yaml') ||
+      extensions.has('.dockerfile') ||
+      hotFiles.some((file) => file.includes('Dockerfile') || file.includes('.github/workflows'))
+    ) {
       caps.push('automation')
     }
   }
@@ -142,9 +161,6 @@ function scoreNextTaskCapabilities(hotFiles, signatureChanges, metrics = {}, pri
 
 /**
  * Detect function/method signature changes in hot files using git diff.
- * @param {import('vscode').WorkspaceFolder} workspaceFolder
- * @param {string[]} hotFiles
- * @returns {{ file: string, change: string }[]}
  */
 function detectSignatureChanges(workspaceFolder, hotFiles) {
   if (!hotFiles || hotFiles.length === 0) return []
@@ -154,7 +170,6 @@ function detectSignatureChanges(workspaceFolder, hotFiles) {
     .filter((file) => file.length > 0)
   if (normalizedHotFiles.length === 0) return []
 
-  // Diff against the parent of the most recent commit.
   const diff = runGit(workspaceFolder, [
     'diff',
     'HEAD~1',
@@ -176,7 +191,6 @@ function detectSignatureChanges(workspaceFolder, hotFiles) {
     }
 
     if (line.startsWith('@@')) continue
-
     if (changes.length >= 10) break
 
     const marker = line[0]
@@ -202,6 +216,7 @@ module.exports = {
   runGit,
   runGitExitCode,
   detectHotFiles,
+  getHotFilesCached,
   normalizeRepoRelativePath,
   parseDiffHeaderPath,
   scoreNextTaskCapabilities,

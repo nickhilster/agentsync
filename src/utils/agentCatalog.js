@@ -48,6 +48,7 @@ const CATEGORY_CAPABILITY_MAP = {
 }
 
 const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/
+const _catalogCache = new Map()
 
 // ━━━ Frontmatter parsing ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -412,6 +413,31 @@ function matchAgentsByCapabilities(agents, requiredCapabilities) {
     .map((s) => s.agent)
 }
 
+/**
+ * Load and cache the bundled/workspace agent catalog.
+ * @param {import('vscode').WorkspaceFolder | null} [workspaceFolder]
+ * @returns {{ schemaVersion: string, agents: object[], categories: string[], lastIndexedAt: string }}
+ */
+function getAgentCatalog(workspaceFolder) {
+  const cacheKey = workspaceFolder?.uri?.fsPath || '__global__'
+  const cached = _catalogCache.get(cacheKey)
+  if (cached) return cached
+
+  const bundledDir = path.join(__dirname, '..', '..', 'templates', 'agents')
+  const rootDirs = [bundledDir]
+
+  if (workspaceFolder) {
+    const workspaceAgentsDir = path.join(workspaceFolder.uri.fsPath, '.agentsync', 'agents')
+    if (fs.existsSync(workspaceAgentsDir)) {
+      rootDirs.push(workspaceAgentsDir)
+    }
+  }
+
+  const catalog = buildCatalog({ rootDirs })
+  _catalogCache.set(cacheKey, catalog)
+  return catalog
+}
+
 // ━━━ Exports ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 module.exports = {
@@ -425,5 +451,6 @@ module.exports = {
   createSystemPrompt,
   createPrompt,
   mapAgentToCapabilities,
-  matchAgentsByCapabilities
+  matchAgentsByCapabilities,
+  getAgentCatalog
 }
