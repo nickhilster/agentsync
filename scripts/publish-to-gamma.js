@@ -57,8 +57,8 @@ Leadership loses visibility: "too many cooks," no clear handoff protocol, no aud
 **Core Principle:** Treat your codebase like a shared workspace with explicit handoff protocols — not a free-for-all. *Structure beats synchronization.*
 
 **Step 1 — Pre-Work Assessment**
-- Read `AgentTracker.md` — understand what changed, hot files, active work
-- Run `git status` & `git pull` — ensure a clean state
+- Read \`AgentTracker.md\` — understand what changed, hot files, active work
+- Run \`git status\` & \`git pull\` — ensure a clean state
 - Run baseline tests — verify nothing is broken before touching code
 
 **Step 2 — Session Start**
@@ -67,7 +67,7 @@ Leadership loses visibility: "too many cooks," no clear handoff protocol, no aud
 - Set token budget to match task complexity
 
 **Step 3 — Work Execution**
-- Feature branch naming: `[agent-name]/[feature]`
+- Feature branch naming: \`[agent-name]/[feature]\`
 - Keep edits small in hot files — minimize merge risk
 - Document partial work in AgentTracker.md immediately
 
@@ -114,7 +114,7 @@ Leadership loses visibility: "too many cooks," no clear handoff protocol, no aud
 - ⭐⭐⭐⭐ Expert · 20K+ tokens — protocol design, system redesign
 
 **Context Efficiency Rules:**
-- Set `max_tokens` to match expected output size — not as a safety net
+- Set \`max_tokens\` to match expected output size — not as a safety net
 - Batch similar small tasks into single requests
 - Use prompt caching for static content
 - Record failed approaches so the next agent learns
