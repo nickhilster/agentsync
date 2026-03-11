@@ -188,7 +188,7 @@ Leadership loses visibility: "too many cooks," no clear handoff protocol, no aud
 
 async function apiGet(path) {
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { "X-API-KEY": API_KEY },
   });
   if (!res.ok) {
     const body = await res.text();
@@ -201,7 +201,7 @@ async function apiPost(path, body) {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${API_KEY}`,
+      "X-API-KEY": API_KEY,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -233,15 +233,15 @@ async function main() {
   const payload = {
     format: "presentation",
     inputText: PRESENTATION_TEXT,
-    cardSplitting: "inputTextBreaks",
+    cardSplit: "inputTextBreaks",
     numCards: 6,
-    textDensity: "detailed",
+    textOptions: { amount: "detailed" },
     ...(themeId && { themeId }),
   };
 
   let result;
   try {
-    result = await apiPost("/generate", payload);
+    result = await apiPost("/generations", payload);
   } catch (err) {
     console.error("❌  Generation failed:", err.message);
     process.exit(1);
