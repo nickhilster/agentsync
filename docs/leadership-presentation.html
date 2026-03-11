@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentSync: Structured Async Collaboration for AI-Driven Development</title>
+  <style>
+    /* ── Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --blue:     #1565C0;
+      --blue-lt:  #1976D2;
+      --blue-bg:  #E3F2FD;
+      --green:    #4CAF50;
+      --green-bg: #E8F5E9;
+      --orange:   #FF9800;
+      --orange-bg:#FFF3E0;
+      --red:      #D32F2F;
+      --red-bg:   #FFEBEE;
+      --gray-dk:  #424242;
+      --gray-md:  #757575;
+      --gray-lt:  #F5F5F5;
+      --white:    #FFFFFF;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 16px; line-height: 1.6; color: var(--gray-dk);
+      background: #ECEFF1;
+    }
+
+    /* ── Navigation ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: var(--blue); color: #fff;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 32px; height: 52px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    }
+    nav .logo { font-weight: 700; font-size: 18px; letter-spacing: .5px; }
+    nav .pages { display: flex; gap: 4px; }
+    nav .pages a {
+      color: rgba(255,255,255,.75); text-decoration: none;
+      font-size: 13px; padding: 6px 12px; border-radius: 4px;
+      transition: background .2s, color .2s;
+    }
+    nav .pages a:hover { background: rgba(255,255,255,.15); color: #fff; }
+
+    /* ── Slide wrapper ── */
+    .slide {
+      min-height: 100vh; padding: 88px 64px 64px;
+      display: flex; flex-direction: column; justify-content: center;
+    }
+    .slide:nth-child(even) { background: #fff; }
+    .slide:nth-child(odd)  { background: var(--gray-lt); }
+
+    .slide-inner {
+      max-width: 1100px; margin: 0 auto; width: 100%;
+    }
+
+    /* ── Typography ── */
+    .page-label {
+      font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--blue); margin-bottom: 10px;
+    }
+    h1 { font-size: 48px; font-weight: 800; line-height: 1.15; color: var(--blue); margin-bottom: 16px; }
+    h2 { font-size: 36px; font-weight: 700; color: var(--blue); margin-bottom: 8px; }
+    h3 { font-size: 22px; font-weight: 700; color: var(--gray-dk); margin-bottom: 8px; }
+    .subhead { font-size: 20px; color: var(--gray-md); margin-bottom: 32px; max-width: 680px; }
+    p { margin-bottom: 12px; }
+
+    /* ── Two-column layout ── */
+    .cols { display: grid; gap: 40px; margin-top: 32px; }
+    .cols-2 { grid-template-columns: 60% 38%; }
+    .cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+    /* ── Stat cards ── */
+    .stat-strip {
+      display: flex; gap: 24px; margin: 32px 0;
+      flex-wrap: wrap;
+    }
+    .stat-card {
+      background: var(--white); border: 1px solid #e0e0e0; border-radius: 12px;
+      padding: 20px 28px; flex: 1 1 160px; min-width: 140px;
+      box-shadow: 0 2px 6px rgba(0,0,0,.06);
+      text-align: center;
+    }
+    .stat-card .number { font-size: 36px; font-weight: 800; color: var(--blue); }
+    .stat-card .label  { font-size: 13px; color: var(--gray-md); margin-top: 4px; }
+
+    /* ── Problem boxes ── */
+    .problem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 28px; }
+    .problem-box {
+      border-radius: 12px; padding: 24px 28px; border-left: 5px solid var(--red);
+      background: var(--red-bg);
+    }
+    .problem-box h3 { color: var(--red); }
+    .problem-box p { color: var(--gray-dk); font-size: 15px; margin: 0; }
+
+    /* ── Protocol steps ── */
+    .protocol-steps { display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
+    .step {
+      display: grid; grid-template-columns: 48px 1fr; gap: 16px; align-items: start;
+      background: #fff; border-radius: 12px; padding: 18px 22px;
+      border: 1px solid #e0e0e0; box-shadow: 0 1px 4px rgba(0,0,0,.05);
+    }
+    .step-num {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--blue); color: #fff; font-size: 20px; font-weight: 800;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .step-body h3 { margin-bottom: 6px; color: var(--blue); font-size: 17px; }
+    .step-body ul { padding-left: 18px; }
+    .step-body ul li { font-size: 14px; color: var(--gray-md); margin-bottom: 3px; }
+
+    /* ── Callout box ── */
+    .callout {
+      border-radius: 12px; padding: 24px 28px; margin-top: 24px;
+    }
+    .callout-blue   { background: var(--blue-bg); border-left: 5px solid var(--blue); }
+    .callout-green  { background: var(--green-bg); border-left: 5px solid var(--green); }
+    .callout-orange { background: var(--orange-bg); border-left: 5px solid var(--orange); }
+    .callout h3 { font-size: 16px; margin-bottom: 10px; color: var(--gray-dk); }
+    .callout ul { padding-left: 20px; }
+    .callout ul li { font-size: 14px; color: var(--gray-dk); margin-bottom: 5px; }
+
+    /* ── Decision tables ── */
+    .matrix-wrap { margin-top: 28px; overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse; font-size: 14px;
+      background: #fff; border-radius: 10px; overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,.07);
+    }
+    thead th {
+      background: var(--blue); color: #fff; padding: 12px 18px;
+      text-align: left; font-weight: 700; font-size: 13px; letter-spacing: .5px;
+      text-transform: uppercase;
+    }
+    tbody tr:nth-child(even) { background: #F8FAFC; }
+    tbody td { padding: 11px 18px; border-bottom: 1px solid #eee; }
+    tbody tr:last-child td { border-bottom: none; }
+    .badge {
+      display: inline-block; padding: 3px 10px; border-radius: 20px;
+      font-size: 12px; font-weight: 700;
+    }
+    .badge-green  { background: var(--green-bg); color: #2E7D32; }
+    .badge-yellow { background: var(--orange-bg); color: #E65100; }
+    .badge-red    { background: var(--red-bg);    color: var(--red); }
+    .badge-blue   { background: var(--blue-bg);   color: var(--blue); }
+    .row-sep td { background: #F0F4FF !important; font-weight: 700;
+      color: var(--blue); font-size: 13px; letter-spacing: .5px; }
+
+    /* ── Metrics dashboard ── */
+    .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 32px; }
+    .metric-card {
+      background: #fff; border-radius: 14px; padding: 24px 28px;
+      border: 1px solid #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,.06);
+    }
+    .metric-card .card-title {
+      font-size: 13px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+      color: var(--blue); margin-bottom: 16px;
+    }
+    .metric-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 0; border-bottom: 1px solid #f0f0f0;
+      font-size: 14px;
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-row .m-label { color: var(--gray-md); }
+    .metric-row .m-value { font-weight: 700; color: var(--gray-dk); }
+    .metric-row .m-value.good { color: var(--green); }
+
+    .roi-box {
+      grid-column: 1 / -1; background: var(--blue); color: #fff;
+      border-radius: 14px; padding: 28px 36px;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px;
+    }
+    .roi-item .roi-num { font-size: 32px; font-weight: 800; }
+    .roi-item .roi-label { font-size: 13px; opacity: .8; margin-top: 4px; }
+
+    /* ── Timeline ── */
+    .timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 32px; }
+    .phase-card {
+      background: #fff; border-radius: 14px; padding: 22px 20px;
+      border-top: 5px solid var(--blue); box-shadow: 0 2px 8px rgba(0,0,0,.07);
+    }
+    .phase-card:nth-child(2) { border-top-color: #1976D2; }
+    .phase-card:nth-child(3) { border-top-color: #388E3C; }
+    .phase-card:nth-child(4) { border-top-color: var(--green); }
+    .phase-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .phase-num {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: var(--blue); color: #fff; font-weight: 800; font-size: 15px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .phase-card:nth-child(2) .phase-num { background: #1976D2; }
+    .phase-card:nth-child(3) .phase-num { background: #388E3C; }
+    .phase-card:nth-child(4) .phase-num { background: var(--green); }
+    .phase-card h3 { font-size: 15px; color: var(--gray-dk); }
+    .phase-card .phase-weeks { font-size: 12px; color: var(--gray-md); margin-bottom: 12px; }
+    .phase-card ul { padding-left: 16px; }
+    .phase-card ul li { font-size: 13px; color: var(--gray-md); margin-bottom: 5px; }
+    .phase-effort {
+      margin-top: 14px; padding: 8px 12px; border-radius: 8px;
+      background: var(--blue-bg); font-size: 12px; font-weight: 700; color: var(--blue);
+    }
+    .phase-card:nth-child(3) .phase-effort,
+    .phase-card:nth-child(4) .phase-effort { background: var(--green-bg); color: #2E7D32; }
+
+    .checklist { list-style: none; padding: 0; margin-top: 12px; }
+    .checklist li { font-size: 14px; padding: 5px 0; display: flex; gap: 8px; align-items: flex-start; }
+    .checklist li::before { content: "☐"; font-size: 16px; color: var(--blue); flex-shrink: 0; }
+
+    /* ── Agents row (Page 1) ── */
+    .agents-row {
+      display: flex; gap: 16px; margin: 28px 0; flex-wrap: wrap;
+    }
+    .agent-chip {
+      display: flex; align-items: center; gap: 10px;
+      background: #fff; border: 2px solid var(--blue-bg); border-radius: 40px;
+      padding: 10px 20px; font-weight: 700; font-size: 15px; color: var(--blue);
+      box-shadow: 0 2px 6px rgba(0,0,0,.06);
+    }
+    .agent-chip .icon { font-size: 22px; }
+    .agent-chip .check { color: var(--green); font-size: 18px; }
+
+    /* ── Speaker notes ── */
+    .speaker-notes {
+      margin-top: 40px; padding: 18px 22px; border-radius: 10px;
+      background: #FFFDE7; border: 1px dashed #F9A825;
+      font-size: 13px; color: #6D4C41;
+    }
+    .speaker-notes strong { color: #E65100; }
+
+    /* ── Footer ── */
+    .slide-footer {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-top: 48px; padding-top: 20px; border-top: 1px solid #e0e0e0;
+      font-size: 12px; color: var(--gray-md);
+    }
+
+    /* ── Token scale ── */
+    .token-scale { margin-top: 24px; }
+    .token-tier {
+      display: grid; grid-template-columns: 140px 1fr; gap: 16px;
+      align-items: start; padding: 12px 0; border-bottom: 1px solid #eee;
+    }
+    .token-tier:last-child { border-bottom: none; }
+    .token-stars { font-size: 18px; }
+    .token-desc { font-size: 14px; }
+    .token-desc .range { font-weight: 700; color: var(--blue); font-size: 13px; }
+    .token-desc ul { padding-left: 16px; margin-top: 4px; }
+    .token-desc ul li { color: var(--gray-md); font-size: 13px; }
+
+    /* ── Print / responsive ── */
+    @media (max-width: 800px) {
+      h1 { font-size: 32px; }
+      h2 { font-size: 26px; }
+      .cols-2, .problem-grid, .metrics-grid, .timeline { grid-template-columns: 1fr; }
+      .roi-box { grid-template-columns: 1fr 1fr; }
+      .slide { padding: 80px 24px 48px; }
+    }
+    @media print {
+      nav { display: none; }
+      .slide { page-break-after: always; min-height: unset; padding: 48px; }
+      .speaker-notes { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ─────────────────────── NAVIGATION ─────────────────────── -->
+<nav>
+  <span class="logo">AgentSync</span>
+  <div class="pages">
+    <a href="#page1">1 · Hook</a>
+    <a href="#page2">2 · Problem</a>
+    <a href="#page3">3 · Protocol</a>
+    <a href="#page4">4 · Framework</a>
+    <a href="#page5">5 · Results</a>
+    <a href="#page6">6 · Roadmap</a>
+  </div>
+</nav>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 1 — TITLE + HOOK
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page1">
+  <div class="slide-inner">
+    <div class="page-label">Page 1 of 6 · Title &amp; Hook</div>
+
+    <h1>AgentSync: Structured Async<br>Collaboration for AI-Driven&nbsp;Development</h1>
+    <p class="subhead">
+      How to coordinate multiple AI agents — Claude, Copilot, Codex — on the same codebase
+      without stepping on each other, and reduce rework by&nbsp;<strong>40%</strong>.
+    </p>
+
+    <div class="agents-row">
+      <div class="agent-chip"><span class="icon">🤖</span> Claude <span class="check">✓</span></div>
+      <div class="agent-chip"><span class="icon">🐙</span> Copilot <span class="check">✓</span></div>
+      <div class="agent-chip"><span class="icon">⚡</span> Codex <span class="check">✓</span></div>
+    </div>
+
+    <div class="stat-strip">
+      <div class="stat-card">
+        <div class="number">47+</div>
+        <div class="label">Development scripts maintained</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">0</div>
+        <div class="label">Merge conflicts on hot files (last 30 days)</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">40%</div>
+        <div class="label">Reduction in rework</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">3–5×</div>
+        <div class="label">More frequent deploys</div>
+      </div>
+    </div>
+
+    <div class="callout callout-blue" style="margin-top:16px;">
+      <h3>The Big Idea</h3>
+      <p style="font-size:17px; color:var(--blue); font-weight:600;">
+        "Let me show you how we're solving the multi-agent problem — and why it matters for every team shipping with AI."
+      </p>
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "Hi, I'm Nikhil. I want to show you how we solved a real problem
+      that gets worse as you add more AI agents to your codebase: context loss, merge conflicts, and
+      duplicate work. We've built something called AgentSync that eliminates these problems.
+      It's not magic — it's a protocol. And I'm going to show you exactly how it works,
+      what it costs, and what it saves."
+    </div>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol</span>
+      <span>1 / 6</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 2 — THE PROBLEM
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page2">
+  <div class="slide-inner">
+    <div class="page-label">Page 2 of 6 · The Problem</div>
+    <h2>The Challenge: Coordinating Multiple AI Agents</h2>
+    <p class="subhead" style="font-size:17px;">
+      Multiple AI agents working on the same codebase creates four compounding problems.
+    </p>
+
+    <div class="problem-grid">
+      <div class="problem-box">
+        <h3>1 · Context Loss</h3>
+        <p>Each agent starts fresh. No agent knows what others are doing.
+           Result: repeated work, duplicated efforts, high context-switching cost.</p>
+      </div>
+      <div class="problem-box">
+        <h3>2 · File Conflicts</h3>
+        <p>Two agents edit the same file simultaneously.
+           Result: merge conflicts waste time, inconsistent architectural decisions compound.</p>
+      </div>
+      <div class="problem-box">
+        <h3>3 · Quality Degradation</h3>
+        <p>No shared understanding of constraints, uncoordinated token budgets, inconsistent code patterns.
+           Result: tech debt accumulates faster than it's cleared.</p>
+      </div>
+      <div class="problem-box">
+        <h3>4 · Trust Issues</h3>
+        <p>Leadership loses visibility: "too many cooks," no clear handoff protocol, no audit trail.
+           Result: reluctance to invest in AI tooling.</p>
+      </div>
+    </div>
+
+    <div class="callout callout-orange" style="margin-top:28px;">
+      <h3>Measured Cost (Before AgentSync)</h3>
+      <ul>
+        <li><strong>30% of developer time</strong> lost to rework and merge-conflict resolution</li>
+        <li><strong>45 minutes</strong> average context-switching overhead per session</li>
+        <li><strong>1× deploy frequency</strong> — bottlenecked by coordination failures</li>
+      </ul>
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "When you have one AI agent, everything is fine. But when you add a second —
+      say, Claude + Copilot — and they both try to edit the same file, problems start stacking up.
+      We measured it. In our first month, we were wasting 30% of developer time on rework and
+      merge conflict resolution. That's unacceptable."
+    </div>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol</span>
+      <span>2 / 6</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 3 — THE SOLUTION / PROTOCOL
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page3">
+  <div class="slide-inner">
+    <div class="page-label">Page 3 of 6 · The Solution</div>
+    <h2>AgentSync Protocol: Structured Async Collaboration</h2>
+
+    <div class="callout callout-blue">
+      <h3>🎯 Core Principle</h3>
+      <p style="font-size:16px; color:var(--blue); font-weight:600;">
+        Treat your codebase like a shared workspace with explicit handoff protocols — not a free-for-all.
+        <em>Structure beats synchronization.</em>
+      </p>
+    </div>
+
+    <div class="protocol-steps">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Pre-Work Assessment</h3>
+          <ul>
+            <li>Read <code>AgentTracker.md</code> — understand what changed, hot files, active work</li>
+            <li>Run <code>git status</code> &amp; <code>git pull</code> — ensure a clean state</li>
+            <li>Run baseline tests — verify nothing is broken before touching code</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Session Start</h3>
+          <ul>
+            <li>Run <em>AgentSync: Start Session</em></li>
+            <li>Declare your goal clearly in AgentTracker</li>
+            <li>Set token budget to match task complexity</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Work Execution</h3>
+          <ul>
+            <li>Feature branch naming: <code>[agent-name]/[feature]</code></li>
+            <li>Keep edits small in hot files — minimize merge risk</li>
+            <li>Document partial work in AgentTracker.md immediately</li>
+            <li>Respect other agents' work-in-progress</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <h3>Health Checks</h3>
+          <ul>
+            <li>Run build &amp; tests before every handoff</li>
+            <li>Verify no regressions introduced</li>
+            <li>Document any blockers or failed approaches so the next agent learns</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <h3>Handoff</h3>
+          <ul>
+            <li>Run <em>AgentSync: End Session</em></li>
+            <li>Commit with a descriptive message</li>
+            <li>Update AgentTracker.md with suggested next work &amp; constraints</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="callout callout-green" style="margin-top:24px;">
+      <h3>Why This Works</h3>
+      <ul>
+        <li>Explicit handoffs reduce context switching from <strong>45 min → 5 min</strong></li>
+        <li>Hot file tracking prevents merge conflicts entirely</li>
+        <li>Token budgets match task complexity (Haiku for routine, Opus for architecture)</li>
+        <li>Health checks catch issues before they compound across sessions</li>
+      </ul>
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "The core principle is simple: treat your codebase like a shared workspace,
+      not a free-for-all. Before you start work, read the handoff document. As you work, stick to small edits
+      in hot files and document what you're doing. Before you hand off, run the test suite. Then update the
+      handoff document for the next agent. This cuts context switching time from 45 minutes to 5 minutes and
+      eliminates merge conflicts entirely on hot files."
+    </div>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol</span>
+      <span>3 / 6</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 4 — DECISION FRAMEWORK
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page4">
+  <div class="slide-inner">
+    <div class="page-label">Page 4 of 6 · Decision Framework</div>
+    <h2>The Decision Framework: Matching Tool to Task</h2>
+
+    <div class="cols cols-2">
+
+      <!-- Left: Model + Risk matrices -->
+      <div>
+
+        <!-- Matrix 1: Model Selection -->
+        <h3 style="margin-bottom:12px;">Model Selection by Task Complexity</h3>
+        <div class="matrix-wrap">
+          <table>
+            <thead>
+              <tr><th>Task Type</th><th>Recommended Model</th><th>Tier</th></tr>
+            </thead>
+            <tbody>
+              <tr class="row-sep"><td colspan="3">ROUTINE</td></tr>
+              <tr>
+                <td>Routine edits, syntax fixes, boilerplate</td>
+                <td>Claude Haiku 4.5</td>
+                <td><span class="badge badge-green">Fast · Cheap</span></td>
+              </tr>
+              <tr class="row-sep"><td colspan="3">STANDARD</td></tr>
+              <tr>
+                <td>Feature implementation, bug fixes, testing</td>
+                <td>Claude Sonnet 4.6</td>
+                <td><span class="badge badge-blue">Balanced</span></td>
+              </tr>
+              <tr class="row-sep"><td colspan="3">ADVANCED</td></tr>
+              <tr>
+                <td>Architecture, multi-file refactor, security decisions</td>
+                <td>Claude Opus 4.6</td>
+                <td><span class="badge badge-yellow">Most Capable</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Matrix 2: Risk -->
+        <h3 style="margin: 28px 0 12px;">Risk Assessment — When to Ask Permission</h3>
+        <div class="matrix-wrap">
+          <table>
+            <thead>
+              <tr><th>Action Type</th><th>Decision</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Local edit (reversible)</td><td><span class="badge badge-green">✅ Proceed</span></td></tr>
+              <tr><td>Local tests (reversible)</td><td><span class="badge badge-green">✅ Proceed</span></td></tr>
+              <tr><td>Branch creation</td><td><span class="badge badge-yellow">⚠️ Coordinate</span></td></tr>
+              <tr><td>Shared config changes</td><td><span class="badge badge-yellow">⚠️ Coordinate</span></td></tr>
+              <tr><td>Dependency updates</td><td><span class="badge badge-yellow">⚠️ Coordinate</span></td></tr>
+              <tr><td>Force push</td><td><span class="badge badge-red">❌ Ask first</span></td></tr>
+              <tr><td>Production changes</td><td><span class="badge badge-red">❌ Ask first</span></td></tr>
+              <tr><td>Destructive operations</td><td><span class="badge badge-red">❌ Ask first</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <!-- Right: Token budget + rules -->
+      <div>
+        <h3 style="margin-bottom:12px;">Token Budget by Task Complexity</h3>
+        <div class="token-scale">
+          <div class="token-tier">
+            <div class="token-stars">⭐</div>
+            <div class="token-desc">
+              <div class="range">Simple · 500–2K tokens</div>
+              <ul>
+                <li>Single function edit</li>
+                <li>Unit test writing</li>
+                <li>Code review feedback</li>
+              </ul>
+            </div>
+          </div>
+          <div class="token-tier">
+            <div class="token-stars">⭐⭐</div>
+            <div class="token-desc">
+              <div class="range">Medium · 2K–8K tokens</div>
+              <ul>
+                <li>Component implementation</li>
+                <li>Integration tests</li>
+                <li>Refactoring 2–3 files</li>
+              </ul>
+            </div>
+          </div>
+          <div class="token-tier">
+            <div class="token-stars">⭐⭐⭐</div>
+            <div class="token-desc">
+              <div class="range">Complex · 8K–20K tokens</div>
+              <ul>
+                <li>Multi-file refactor</li>
+                <li>Architecture design</li>
+                <li>Full feature implementation</li>
+              </ul>
+            </div>
+          </div>
+          <div class="token-tier">
+            <div class="token-stars">⭐⭐⭐⭐</div>
+            <div class="token-desc">
+              <div class="range">Expert · 20K+ tokens</div>
+              <ul>
+                <li>Protocol design</li>
+                <li>System redesign</li>
+                <li>Cross-cutting concerns</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="callout callout-blue" style="margin-top:20px;">
+          <h3>Context Efficiency Rules</h3>
+          <ul>
+            <li>Set <code>max_tokens</code> to match expected output size — not as a safety net</li>
+            <li>Batch similar small tasks into single requests</li>
+            <li>Use prompt caching for static content (schemas, patterns)</li>
+            <li>Never over-allocate context — wastes budget and slows responses</li>
+            <li>Record failed approaches so the next agent learns from them</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "Knowing the protocol isn't enough. You also need good decisions about
+      which AI agent to use, when to ask permission, and how to budget tokens. Three simple frameworks:
+      (1) match task complexity to model choice, (2) assess reversibility before acting,
+      (3) budget tokens to actual complexity — not a safety net. These let any agent make good decisions autonomously."
+    </div>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol</span>
+      <span>4 / 6</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 5 — RESULTS & METRICS
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page5">
+  <div class="slide-inner">
+    <div class="page-label">Page 5 of 6 · Results &amp; Metrics</div>
+    <h2>Measured Impact: How AgentSync Improves Delivery</h2>
+
+    <div class="metrics-grid">
+
+      <!-- Deployment -->
+      <div class="metric-card">
+        <div class="card-title">📊 Deployment Metrics</div>
+        <div class="metric-row">
+          <span class="m-label">Deploy Frequency</span>
+          <span class="m-value good">3–5× / week <small style="color:var(--gray-md)">(was 1×)</small></span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Mean Time to Recovery</span>
+          <span class="m-value good">15 min <small style="color:var(--gray-md)">(was 45)</small></span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Release Stability</span>
+          <span class="m-value good">99.2% <small style="color:var(--gray-md)">(was 94%)</small></span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Hot File Conflicts</span>
+          <span class="m-value good">0 in last 30 days</span>
+        </div>
+      </div>
+
+      <!-- Productivity -->
+      <div class="metric-card">
+        <div class="card-title">⚡ Developer Productivity</div>
+        <div class="metric-row">
+          <span class="m-label">Context Switching Time</span>
+          <span class="m-value good">5 min <small style="color:var(--gray-md)">(was 45)</small></span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Rework Percentage</span>
+          <span class="m-value good">8% <small style="color:var(--gray-md)">(was 30%)</small></span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Feature Velocity</span>
+          <span class="m-value good">+40% stories / sprint</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Code Review Time</span>
+          <span class="m-value good">3 hrs <small style="color:var(--gray-md)">(was 8)</small></span>
+        </div>
+      </div>
+
+      <!-- Codebase health -->
+      <div class="metric-card">
+        <div class="card-title">🏗️ Codebase Health</div>
+        <div class="metric-row">
+          <span class="m-label">Test Coverage</span>
+          <span class="m-value good">82%</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Build Success Rate</span>
+          <span class="m-value good">99.1%</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Critical Security Issues</span>
+          <span class="m-value good">0</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Contentious Merges</span>
+          <span class="m-value good">0</span>
+        </div>
+      </div>
+
+      <!-- Team coordination -->
+      <div class="metric-card">
+        <div class="card-title">🤝 Team Coordination</div>
+        <div class="metric-row">
+          <span class="m-label">Handoff Clarity (Survey)</span>
+          <span class="m-value good">9 / 10</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Duplicate Work</span>
+          <span class="m-value good">0% in tracked sprints</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Cross-Agent Alignment</span>
+          <span class="m-value good">95% decision consistency</span>
+        </div>
+        <div class="metric-row">
+          <span class="m-label">Team Satisfaction</span>
+          <span class="m-value good">85%</span>
+        </div>
+      </div>
+
+      <!-- ROI row -->
+      <div class="roi-box">
+        <div class="roi-item">
+          <div class="roi-num">30 hrs</div>
+          <div class="roi-label">saved on merge conflict resolution / mo</div>
+        </div>
+        <div class="roi-item">
+          <div class="roi-num">20 hrs</div>
+          <div class="roi-label">saved on duplicate work / mo</div>
+        </div>
+        <div class="roi-item">
+          <div class="roi-num">15 hrs</div>
+          <div class="roi-label">saved on context switching / mo</div>
+        </div>
+        <div class="roi-item">
+          <div class="roi-num">~$50K</div>
+          <div class="roi-label">estimated monthly value recovered</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "We deployed 5× more frequently. Rework dropped from 30% to 8%.
+      Context switching dropped from 45 minutes to 5 minutes. Zero merge conflicts on hot files in 30 days.
+      By the numbers, that's about 2 developer-weeks recovered per month — roughly $50K in recovered productivity."
+    </div>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol — Data source: AgentTracker.md, GitHub</span>
+      <span>5 / 6</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     PAGE 6 — IMPLEMENTATION PATH
+═══════════════════════════════════════════════════════════ -->
+<section class="slide" id="page6">
+  <div class="slide-inner">
+    <div class="page-label">Page 6 of 6 · Implementation Path</div>
+    <h2>Getting Started: Implement AgentSync in Your Team</h2>
+
+    <div class="timeline">
+
+      <div class="phase-card">
+        <div class="phase-header">
+          <div class="phase-num">1</div>
+          <div><h3>Foundation</h3></div>
+        </div>
+        <div class="phase-weeks">Week 1–2</div>
+        <ul>
+          <li>Set up AgentTracker.md template</li>
+          <li>Configure .agentsync.json (build/test commands)</li>
+          <li>Document your Hot Files (critical paths)</li>
+          <li>Brief team on the 5-part protocol</li>
+        </ul>
+        <div class="phase-effort">⏱️ ~4 hours setup</div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-header">
+          <div class="phase-num">2</div>
+          <div><h3>Pilot</h3></div>
+        </div>
+        <div class="phase-weeks">Week 3–4</div>
+        <ul>
+          <li>Run "AgentSync: Start Session" for all new work</li>
+          <li>Track handoffs in AgentTracker.md</li>
+          <li>Document 2–3 "Failed Approaches" entries</li>
+          <li>Measure baseline rework % and conflicts</li>
+          <li>Team checkpoint: friction &amp; wins</li>
+        </ul>
+        <div class="phase-effort">⏱️ Minutes per session</div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-header">
+          <div class="phase-num">3</div>
+          <div><h3>Optimization</h3></div>
+        </div>
+        <div class="phase-weeks">Week 5–8</div>
+        <ul>
+          <li>Refine token budget guidelines from real data</li>
+          <li>Add model selection framework to runbooks</li>
+          <li>Create custom agent personalities</li>
+          <li>Implement health check commands</li>
+          <li>Weekly retros on coordination</li>
+        </ul>
+        <div class="phase-effort">⏱️ ~2 hrs + feedback loop</div>
+      </div>
+
+      <div class="phase-card">
+        <div class="phase-header">
+          <div class="phase-num">4</div>
+          <div><h3>Scaling</h3></div>
+        </div>
+        <div class="phase-weeks">Week 9+</div>
+        <ul>
+          <li>Roll out to all teams</li>
+          <li>Create org-level agent catalog (55+ personalities)</li>
+          <li>Set up AgentSync dashboards (GitHub + Notion)</li>
+          <li>Measure org-level improvements</li>
+          <li>Continuous improvement cycle</li>
+        </ul>
+        <div class="phase-effort">⏱️ ~8 hrs + ongoing ops</div>
+      </div>
+
+    </div>
+
+    <!-- Success checkpoints + quick start side by side -->
+    <div class="cols cols-2" style="margin-top:28px; gap:24px;">
+
+      <div class="callout callout-green">
+        <h3>✅ Success Checkpoints</h3>
+        <ul>
+          <li><strong>End of Phase 1:</strong> All agents using AgentTracker.md · 0 hot-file conflicts · 100% test pass before handoffs</li>
+          <li><strong>End of Phase 2:</strong> 50% rework reduction · 80%+ team satisfaction · All handoffs documented</li>
+          <li><strong>End of Phase 3:</strong> 2× deploy frequency · &lt;5 min context switching · Org model guidelines adopted</li>
+          <li><strong>End of Phase 4:</strong> Team ships 40%+ faster · 0 critical merge conflicts · Playbook replicated org-wide</li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="callout callout-blue">
+          <h3>To Start Today</h3>
+          <ul class="checklist">
+            <li>Create <code>AgentTracker.md</code> in repo root</li>
+            <li>Add <code>.agentsync.json</code> with build/test commands</li>
+            <li>Brief team on the 5-part protocol</li>
+            <li>Run "AgentSync: Start Session" on next task</li>
+            <li>Document your first handoff</li>
+            <li>Share lessons learned</li>
+          </ul>
+        </div>
+
+        <div class="callout callout-orange" style="margin-top:16px;">
+          <h3>Investment vs. Return</h3>
+          <ul>
+            <li>⏱️ <strong>Setup:</strong> 4 hours</li>
+            <li>⏱️ <strong>Per session:</strong> ~5 minutes</li>
+            <li>💰 <strong>Monthly payoff:</strong> 2 dev-weeks recovered</li>
+            <li>📈 <strong>Scale:</strong> Works with 2 agents or 200+</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="speaker-notes">
+      <strong>Speaker notes:</strong> "Rolling this out is straightforward. Phase 1 is just setting up the template
+      and briefing the team — 4 hours. Phase 2 is running with it for 2 weeks and measuring what happens.
+      By the end of Phase 1, you'll know if this works. By Phase 4, you'll have a repeatable playbook at scale.
+      The time investment is small. The upside is massive. Any questions?"
+    </div>
+
+    <!-- FAQ teaser -->
+    <details style="margin-top:32px; background:#fff; border-radius:10px; padding:16px 22px; border:1px solid #e0e0e0;">
+      <summary style="font-weight:700; font-size:16px; cursor:pointer; color:var(--blue);">
+        FAQ for Leadership (click to expand)
+      </summary>
+      <div style="margin-top:16px; display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+        <div>
+          <p><strong>Q: Isn't this over-engineered?</strong><br>
+          A: The overhead is 5 min/session. The payoff is 2 dev-weeks/month. Overhead &lt;&lt; return.</p>
+          <p><strong>Q: What if agents don't follow the protocol?</strong><br>
+          A: Build it into CI/CD. Require passing health checks before merge. Protocol becomes a gate, not a suggestion.</p>
+          <p><strong>Q: Does this work with human developers?</strong><br>
+          A: 100%. AgentSync works better with mixed human + AI teams. The protocol is platform-agnostic.</p>
+        </div>
+        <div>
+          <p><strong>Q: What's the learning curve?</strong><br>
+          A: ~1 hour to learn the 5-part protocol. Adoption challenge is habit, not comprehension.</p>
+          <p><strong>Q: Can we start with just one team?</strong><br>
+          A: Yes. Start with your hottest team (most deployments, most risk), then expand.</p>
+          <p><strong>Q: What if we use a different AI tool?</strong><br>
+          A: AgentSync is tool-agnostic. Works with Copilot, Codex, Claude, ChatGPT, or any mix.</p>
+        </div>
+      </div>
+    </details>
+
+    <div class="slide-footer">
+      <span>Nikhil · AgentSync Protocol</span>
+      <span>6 / 6</span>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>
