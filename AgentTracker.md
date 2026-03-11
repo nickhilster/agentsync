@@ -5,11 +5,11 @@
 
 ## Last Session
 
-- **Agent:** Codex
-- **Date:** 2026-02-22T00:00:00Z
-- **Summary:** Implemented AgentSync Live webview dashboard, handoff-aware details panel, stale-session controls, and local VSIX refresh workflow.
-- **Branch:** master
-- **Commit:** (see latest commit after EOD push)
+- **Agent:** Copilot
+- **Date:** 2026-03-11T05:30:52Z
+- **Summary:** Investigated MCP server access for Notion and Linear. Neither is available in the current agent environment — only Playwright and GitHub MCP servers are active.
+- **Branch:** copilot/check-access-notion-linear
+- **Commit:** (see latest commit)
 
 ## Current Health
 
@@ -45,6 +45,8 @@
 - Decide default `autoStaleSessionMinutes` for new workspaces (currently `0`, disabled).
 - Optionally add automated tests for `getOperationalState`, stale-session logic, and handoff bucket grouping.
 - Confirm packaging allowlist/ignore strategy for root protocol docs that are now present in repo.
+- **To enable Notion MCP access**: Configure a Notion MCP server (e.g. `@notionhq/notion-mcp-server`) in the `GITHUB_COPILOT_MCP_JSON` workflow input and provide a valid Notion API token.
+- **To enable Linear MCP access**: Configure a Linear MCP server in the `GITHUB_COPILOT_MCP_JSON` workflow input and provide a valid Linear API key.
 
 ## Known Issues & Gotchas
 
@@ -52,6 +54,8 @@
 - If AgentSync appears Busy while no one is working, use `AgentSync: Clear Active Session` (stale `state.json` flag).
 - Extension Development Host can surface unrelated extension failures unless launched in isolated mode.
 - `AgentSync Live` requires webview registration (`"type": "webview"` in contributed view).
+- **Notion MCP**: Not available in this agent environment. No Notion MCP server is configured — previously confirmed `Auth required` when attempted. To enable, add a Notion MCP server entry to `GITHUB_COPILOT_MCP_JSON` in the workflow inputs.
+- **Linear MCP**: Not available in this agent environment. No Linear MCP server is configured. To enable, add a Linear MCP server entry to `GITHUB_COPILOT_MCP_JSON` in the workflow inputs. (A Linear document exists at https://linear.app/teambotics/document/agentsync-eod-status-2026-02-22-ce7c369563e1 but requires a configured MCP server to access programmatically.)
 
 ## Conventions
 
