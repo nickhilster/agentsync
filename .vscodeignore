@@ -29,3 +29,10 @@ scripts/
 docs/
 schemas/
 .github/
+analyze.js
+esbuild.js
+jest-errors.txt
+jest-results.json
+test-output.txt
+tsconfig.json
+src/

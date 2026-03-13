@@ -13,7 +13,12 @@
     "automation.handoffRoutingDefaults": "Default routing map keyed by source agent id (claude/codex/copilot). Used to auto-draft handoffs.",
     "commands.build": "Shell command to run as the build health check on End Session (for example, 'npm run build'). No shell operators (&&, |) - use a script file instead.",
     "commands.test": "Shell command to run as the test health check on End Session (for example, 'npm test').",
-    "commands.deploy": "Shell command to run as the deploy health check on End Session (for example, 'npm run deploy'). Leave empty to skip."
+    "commands.deploy": "Shell command to run as the deploy health check on End Session (for example, 'npm run deploy'). Leave empty to skip.",
+    "modelTiers": "Advisory model tier definitions. Agents reference these when recommending models for handoffs.",
+    "tokenBudget.maxTokensDefault": "Advisory default max_tokens for agent completions. Agents should set max_tokens to match expected output size.",
+    "tokenBudget.batchSimilarTasks": "When true, agents should batch similar small tasks into single requests to conserve RPM.",
+    "tokenBudget.enableCaching": "When true, agents should use prompt caching for static content (system prompts, library schemas).",
+    "tokenBudget.sessionDurationWarningMinutes": "Show a context status warning when a session exceeds this many minutes. 0 = disabled."
   },
   "staleAfterHours": 24,
   "autoStaleSessionMinutes": 0,
@@ -47,6 +52,22 @@
         "required_capabilities": []
       }
     }
+  },
+  "modelTiers": {
+    "worker": {
+      "models": ["claude-haiku-4-5", "gpt-5-mini"],
+      "useCases": ["routine edits", "syntax fixes", "boilerplate", "simple tests"]
+    },
+    "lead": {
+      "models": ["claude-opus-4-6", "gpt-5.3-codex"],
+      "useCases": ["architecture", "multi-file refactoring", "complex reasoning", "dependency analysis"]
+    }
+  },
+  "tokenBudget": {
+    "maxTokensDefault": 4000,
+    "batchSimilarTasks": true,
+    "enableCaching": true,
+    "sessionDurationWarningMinutes": 0
   },
   "commands": {
     "build": "",

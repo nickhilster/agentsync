@@ -3,230 +3,33 @@ const fs = require('fs')
 const path = require('path')
 const cp = require('child_process')
 
-const PLACEHOLDER = '-'
-const EM_DASH = 'â€”'
-const DEFAULT_STALE_HOURS = 24
-const OPEN_HANDOFF_STATUSES = new Set([
-  'queued',
-  'in_progress',
-  'blocked',
-  'ready_for_review',
-  'approved'
-])
-const DEFAULT_END_SESSION_ZERO_TOUCH = Object.freeze({
-  enabled: false,
-  autonomy: 'mostly_full_auto',
-  copyPromptToClipboard: true,
-  maxSummaryLength: 180
-})
-const DEFAULT_START_SESSION_ZERO_TOUCH = Object.freeze({
-  enabled: false,
-  autoClaimHandoff: false,
-  promptPreFill: true
-})
-const DEFAULT_HANDOFF_ROUTING_DEFAULTS = Object.freeze({
-  claude: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] },
-  codex: { owner_mode: 'single', to_agents: ['claude'], required_capabilities: [] },
-  copilot: { owner_mode: 'single', to_agents: ['codex'], required_capabilities: [] }
-})
+// ——— Modular utility imports ———————————————————————————————————————————
+const {
+  // constants
+  PLACEHOLDER, DEFAULT_STALE_HOURS, OPEN_HANDOFF_STATUSES,
+  DEFAULT_END_SESSION_ZERO_TOUCH, DEFAULT_START_SESSION_ZERO_TOUCH,
+  DEFAULT_HANDOFF_ROUTING_DEFAULTS, ROLE_LIST,
+  // paths
+  getTemplatesDir, getTrackerPath, getConfigPath, getAgentSyncDir,
+  getStatePath, getRequestPath, getResultPath, getHandoffsPath, getContextCapsulePath,
+  // text
+  isEmptyValue, escapeRegExp, parseTracker, getSectionBody, setSectionBody,
+  canonicalAgentId, toSingleLine, truncateSingleLine, formatElapsed,
+  // io
+  atomicWriteFileSync, parseISODate, parseCommandArgv, createNonce,
+  // git
+  runGit, runGitExitCode, detectHotFiles, normalizeRepoRelativePath,
+  scoreNextTaskCapabilities, detectSignatureChanges,
+  // workspace
+  getActiveWorkspaceFolder, resolveWorkspaceFolder, getWorkspaceLabelPrefix,
+  // snapshot
+  WorkspaceSnapshotService
+} = require('./utils')
 
-// â”€â”€â”€ Path helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Returns the templates directory bundled with this extension.
- * @param {vscode.ExtensionContext} context
- */
-function getTemplatesDir(context) {
-  return path.join(context.extensionPath, 'templates')
-}
-
-/**
- * Resolve the AgentTracker.md path for a workspace folder.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getTrackerPath(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, 'AgentTracker.md')
-}
-
-/**
- * Resolve the .agentsync.json config path for a workspace folder.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getConfigPath(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, '.agentsync.json')
-}
-
-/**
- * Resolve the .agentsync/ runtime directory for a workspace folder.
- * This directory holds state.json, request.json, and result.json.
- * It should be added to .gitignore â€” initWorkspace does this automatically.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getAgentSyncDir(workspaceFolder) {
-  return path.join(workspaceFolder.uri.fsPath, '.agentsync')
-}
-
-/**
- * Resolve the state file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getStatePath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'state.json')
-}
-
-/**
- * Resolve the drop-zone request file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getRequestPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'request.json')
-}
-
-/**
- * Resolve the drop-zone result file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getResultPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'result.json')
-}
-
-/**
- * Resolve the handoffs file path.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getHandoffsPath(workspaceFolder) {
-  return path.join(getAgentSyncDir(workspaceFolder), 'handoffs.json')
-}
-
-// â”€â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Whether a parsed value should be treated as empty.
- * @param {string | undefined | null} value
- */
-function isEmptyValue(value) {
-  const normalized = (value || '').trim()
-  return normalized.length === 0 || normalized === PLACEHOLDER || normalized === EM_DASH
-}
-
-/**
- * Parse AgentTracker.md content for status and automation.
- * @param {string} content
- */
-function parseTracker(content) {
-  const pick = (label) => {
-    const match = content.match(new RegExp(`\\*\\*${escapeRegExp(label)}:\\*\\*\\s*(.+)`))
-    return match?.[1]?.trim() ?? PLACEHOLDER
-  }
-
-  return {
-    agent: pick('Agent'),
-    date: pick('Date'),
-    summary: pick('Summary'),
-    branch: pick('Branch'),
-    commit: pick('Commit')
-  }
-}
-
-/**
- * Escape a string for use in a regular expression.
- * @param {string} value
- * @returns {string}
- */
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-/**
- * Get the content body for a given section heading.
- * @param {string} content
- * @param {string} heading
- * @returns {string}
- */
-function getSectionBody(content, heading) {
-  const matcher = new RegExp(
-    `## ${escapeRegExp(heading)}\\r?\\n\\r?\\n([\\s\\S]*?)(?=\\r?\\n## |$)`,
-    'm'
-  )
-  const match = content.match(matcher)
-  return match?.[1]?.trim() ?? ''
-}
-
-/**
- * Replace a section body and keep the rest of the document intact.
- * @param {string} content
- * @param {string} heading
- * @param {string} body
- * @returns {string}
- */
-function setSectionBody(content, heading, body) {
-  const normalizedBody = body.trimEnd()
-  const matcher = new RegExp(
-    `(## ${escapeRegExp(heading)}\\r?\\n\\r?\\n)([\\s\\S]*?)(?=\\r?\\n## |$)`,
-    'm'
-  )
-
-  if (matcher.test(content)) {
-    return content.replace(matcher, `$1${normalizedBody}\n`)
-  }
-
-  return `${content.trimEnd()}\n\n## ${heading}\n\n${normalizedBody}\n`
-}
-
-// â”€â”€â”€ Workspace helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Get active workspace folder without showing prompts.
- * @returns {vscode.WorkspaceFolder | null}
- */
-function getActiveWorkspaceFolder() {
-  const activeUri = vscode.window.activeTextEditor?.document?.uri
-  if (activeUri) {
-    const activeFolder = vscode.workspace.getWorkspaceFolder(activeUri)
-    if (activeFolder) return activeFolder
-  }
-
-  return vscode.workspace.workspaceFolders?.[0] ?? null
-}
-
-/**
- * Resolve a workspace folder for a command invocation.
- * @param {{ allowPick?: boolean }} options
- * @returns {Promise<vscode.WorkspaceFolder | null>}
- */
-async function resolveWorkspaceFolder(options = {}) {
-  const { allowPick = true } = options
-  const folders = vscode.workspace.workspaceFolders
-  if (!folders || folders.length === 0) return null
-
-  const activeFolder = getActiveWorkspaceFolder()
-  if (activeFolder) return activeFolder
-
-  if (folders.length === 1 || !allowPick) {
-    return folders[0]
-  }
-
-  const picks = folders.map((folder) => ({
-    label: folder.name,
-    description: folder.uri.fsPath,
-    folder
-  }))
-
-  const selected = await vscode.window.showQuickPick(picks, {
-    placeHolder: 'Select a workspace folder for AgentSync'
-  })
-
-  return selected?.folder ?? null
-}
-
-// â”€â”€â”€ Config reader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const HOT_FILES_CACHE_TTL_MS = 4000
+const _hotFilesCache = new Map()
+let _snapshotService = null
+// ━━━ Config reader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
  * Read optional AgentSync configuration.
@@ -308,13 +111,54 @@ function readAgentSyncConfig(workspaceFolder) {
     }
     return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults }
   }
+  const DEFAULT_TOKEN_BUDGET = Object.freeze({
+    maxTokensDefault: 4000,
+    batchSimilarTasks: true,
+    enableCaching: true,
+    sessionDurationWarningMinutes: 0
+  })
+  const normalizeTokenBudget = (value = {}) => ({
+    maxTokensDefault: toNumber(value.maxTokensDefault, DEFAULT_TOKEN_BUDGET.maxTokensDefault),
+    batchSimilarTasks:
+      value.batchSimilarTasks === undefined ? true : value.batchSimilarTasks === true,
+    enableCaching: value.enableCaching === undefined ? true : value.enableCaching === true,
+    sessionDurationWarningMinutes: Math.max(
+      0,
+      Math.round(
+        toNumber(
+          value.sessionDurationWarningMinutes,
+          DEFAULT_TOKEN_BUDGET.sessionDurationWarningMinutes
+        )
+      )
+    )
+  })
+  const normalizeModelTiers = (value = {}) => {
+    const result = {}
+    for (const [tier, def] of Object.entries(value)) {
+      if (tier !== 'worker' && tier !== 'lead') continue
+      result[tier] = {
+        models: Array.isArray(def?.models)
+          ? def.models.map((m) => String(m).trim()).filter(Boolean)
+          : [],
+        useCases: Array.isArray(def?.useCases)
+          ? def.useCases.map((u) => String(u).trim()).filter(Boolean)
+          : []
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null
+  }
   const defaults = {
     staleAfterHours: DEFAULT_STALE_HOURS,
     autoStaleSessionMinutes:
       Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0 ? settingsAutoStale : 0,
     commands: {},
     requireHandoffOnEndSession: false,
-    automation: normalizeAutomation({})
+    automation: normalizeAutomation({}),
+    modelTiers: null,
+    tokenBudget: normalizeTokenBudget({}),
+    userProfile: null,
+    dashboardShortcuts: null,
+    sessionDurationWarningMinutes: 0
   }
   const configPath = getConfigPath(workspaceFolder)
   if (!fs.existsSync(configPath)) return defaults
@@ -336,11 +180,32 @@ function readAgentSyncConfig(workspaceFolder) {
           : 0,
       commands: parsed.commands && typeof parsed.commands === 'object' ? parsed.commands : {},
       requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
-      automation: normalizeAutomation(parsed.automation || {})
+      automation: normalizeAutomation(parsed.automation || {}),
+      modelTiers: normalizeModelTiers(parsed.modelTiers || {}),
+      tokenBudget: normalizeTokenBudget(parsed.tokenBudget || {}),
+      userProfile:
+        parsed.userProfile && typeof parsed.userProfile === 'object' ? parsed.userProfile : null,
+      dashboardShortcuts: Array.isArray(parsed.dashboardShortcuts)
+        ? parsed.dashboardShortcuts
+        : null,
+      sessionDurationWarningMinutes: toNumber(parsed.sessionDurationWarningMinutes, 0)
     }
   } catch {
     return defaults
   }
+}
+
+/**
+ * Write the agentsync config file with pretty JSON.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {any} data
+ */
+function writeConfigFile(workspaceFolder, data) {
+  const configPath = getConfigPath(workspaceFolder)
+  try {
+    atomicWriteFileSync(configPath, JSON.stringify(data, null, 2))
+    invalidateWorkspaceCaches(workspaceFolder)
+  } catch {}
 }
 
 /**
@@ -359,16 +224,152 @@ function readStateFile(workspaceFolder) {
 }
 
 /**
+ * Lazily create and return the shared workspace snapshot service.
+ * @returns {WorkspaceSnapshotService}
+ */
+function getWorkspaceSnapshotService() {
+  if (_snapshotService) return _snapshotService
+
+  _snapshotService = new WorkspaceSnapshotService({
+    readTracker,
+    parseTracker,
+    readStateFile,
+    readConfig: readAgentSyncConfig,
+    readHandoffs,
+    getInProgressLines,
+    placeholder: PLACEHOLDER
+  })
+  return _snapshotService
+}
+
+/**
+ * Read a cached workspace snapshot.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {{ force?: boolean }} [options]
+ */
+function getWorkspaceSnapshot(workspaceFolder, options = {}) {
+  return getWorkspaceSnapshotService().getSnapshot(workspaceFolder, options)
+}
+
+/**
+ * Invalidate per-workspace caches.
+ * @param {vscode.WorkspaceFolder | null | undefined} workspaceFolder
+ */
+function invalidateWorkspaceCaches(workspaceFolder) {
+  if (!workspaceFolder) {
+    _hotFilesCache.clear()
+    getWorkspaceSnapshotService().invalidateAll()
+    return
+  }
+  _hotFilesCache.delete(workspaceFolder.uri.fsPath)
+  getWorkspaceSnapshotService().invalidate(workspaceFolder)
+}
+
+/**
+ * Cache hot-file detection to avoid repeated git churn during UI refresh bursts.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {{ force?: boolean }} [options]
+ * @returns {string[]}
+ */
+function getHotFilesCached(workspaceFolder, options = {}) {
+  const { force = false } = options
+  const key = workspaceFolder.uri.fsPath
+  const cached = _hotFilesCache.get(key)
+  const now = Date.now()
+  if (
+    !force &&
+    cached &&
+    now - cached.fetchedAt <= HOT_FILES_CACHE_TTL_MS &&
+    Array.isArray(cached.files)
+  ) {
+    return cached.files
+  }
+  const files = detectHotFiles(workspaceFolder)
+  _hotFilesCache.set(key, { files, fetchedAt: now })
+  return files
+}
+
+/**
  * Normalize agent names/ids for comparisons.
  * @param {string | undefined | null} value
  * @returns {string}
  */
-function canonicalAgentId(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '_')
+
+/**
+ * Prompt the user to select their workspace role.
+ * @param {string} [prefillRole]
+ * @returns {Promise<string|null>}
+ */
+async function promptForRole(prefillRole) {
+  const picks = ROLE_LIST.map((r) => ({
+    label: r.replace(/_/g, ' '),
+    description: '',
+    role: r
+  }))
+  if (prefillRole) {
+    const match = picks.find((p) => p.role === prefillRole)
+    if (match) return match.role
+  }
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: 'Select your primary role for this project',
+    ignoreFocusOut: true
+  })
+  return selected?.role || null
 }
+
+/**
+ * Apply a preset configuration and instruction block for the given role.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} role
+ */
+function applyRolePreset(workspaceFolder, role) {
+  if (!ROLE_LIST.includes(role)) return
+  const root = workspaceFolder.uri.fsPath
+  // read role JSON template
+  let preset = null
+  try {
+    const rolesDir = path.join(__dirname, 'templates', 'roles')
+    const raw = fs.readFileSync(path.join(rolesDir, `${role}.json`), 'utf8')
+    preset = JSON.parse(raw)
+  } catch {
+    // missing or invalid roles file
+  }
+  if (!preset) return
+
+  // Update Config
+  const cfg = readAgentSyncConfig(workspaceFolder)
+  cfg.userProfile = { role }
+  if (Array.isArray(preset.dashboardShortcuts)) {
+    cfg.dashboardShortcuts = preset.dashboardShortcuts
+  }
+  if (typeof preset.sessionDurationWarningMinutes === 'number') {
+    cfg.sessionDurationWarningMinutes = preset.sessionDurationWarningMinutes
+  }
+  if (preset.handoffRoutingDefaults) {
+    cfg.automation = cfg.automation || {}
+    cfg.automation.handoffRoutingDefaults = preset.handoffRoutingDefaults
+  }
+  writeConfigFile(workspaceFolder, cfg)
+
+  // Append role instructions to agent docs
+  const appendBlock = (filePath, text) => {
+    let content = ''
+    try {
+      content = fs.readFileSync(filePath, 'utf8')
+    } catch {}
+    // remove previous role block
+    content = content.replace(/## Role:[\s\S]*?(?=\n## |$)/g, '')
+    content += '\n\n## Role: ' + role.replace(/_/g, ' ') + '\n\n' + text + '\n'
+    fs.writeFileSync(filePath, content, 'utf8')
+  }
+
+  if (preset.agentInstructionBlock) {
+    appendBlock(path.join(root, 'CLAUDE.md'), preset.agentInstructionBlock)
+    appendBlock(path.join(root, 'AGENTS.md'), preset.agentInstructionBlock)
+    appendBlock(path.join(root, '.github', 'copilot-instructions.md'), preset.agentInstructionBlock)
+  }
+}
+
 
 /**
  * Parse normalized In Progress lines from tracker content.
@@ -419,6 +420,7 @@ function ensureHandoffsFile(workspaceFolder) {
     const handoffsPath = getHandoffsPath(workspaceFolder)
     if (!fs.existsSync(handoffsPath)) {
       fs.writeFileSync(handoffsPath, JSON.stringify({ version: 1, handoffs: [] }, null, 2), 'utf8')
+      invalidateWorkspaceCaches(workspaceFolder)
     }
   } catch (err) {
     // M4: only silently ignore ENOENT; log unexpected errors
@@ -436,6 +438,7 @@ function writeHandoffs(workspaceFolder, data) {
   const handoffsPath = getHandoffsPath(workspaceFolder)
   // C3: atomic write prevents partial-write corruption
   atomicWriteFileSync(handoffsPath, JSON.stringify(data, null, 2))
+  invalidateWorkspaceCaches(workspaceFolder)
 }
 
 /**
@@ -445,9 +448,14 @@ function writeHandoffs(workspaceFolder, data) {
  */
 function validateHandoff(handoff) {
   const errors = []
+  const skipReason =
+    handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== undefined
+      ? String(handoff.no_handoff_reason || '').trim()
+      : null
+  const isSkip = Boolean(skipReason)
 
   if (!handoff.from_agent) errors.push('from_agent is required')
-  if (!handoff.summary) errors.push('summary is required')
+  if (!handoff.summary && !isSkip) errors.push('summary is required')
   if (!handoff.owner_mode) errors.push('owner_mode is required')
   if (!handoff.status) errors.push('status is required')
 
@@ -470,6 +478,13 @@ function validateHandoff(handoff) {
   if (handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== undefined) {
     if (typeof handoff.no_handoff_reason !== 'string' || !handoff.no_handoff_reason.trim()) {
       errors.push('no_handoff_reason must be a non-empty string when provided')
+    } else {
+      if (mode !== 'auto') {
+        errors.push('skip/no_handoff records must use owner_mode "auto"')
+      }
+      if (toAgents.length > 0) {
+        errors.push('skip/no_handoff records must not set to_agents')
+      }
     }
   }
 
@@ -609,18 +624,7 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
   return { open, assignedToMe, sharedWithMe, blockedOrStale }
 }
 
-/**
- * Create a nonce for webview script/style tags.
- * @returns {string}
- */
-function createNonce() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  let text = ''
-  for (let i = 0; i < 32; i += 1) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return text
-}
+
 
 // â”€â”€â”€ Git helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -630,15 +634,7 @@ function createNonce() {
  * @param {string[]} args
  * @returns {string | null}
  */
-function runGit(workspaceFolder, args) {
-  const result = cp.spawnSync('git', args, {
-    cwd: workspaceFolder.uri.fsPath,
-    encoding: 'utf8'
-  })
 
-  if (result.error || result.status !== 0) return null
-  return result.stdout.trim()
-}
 
 /**
  * Run a git command and return the exit code.
@@ -646,15 +642,7 @@ function runGit(workspaceFolder, args) {
  * @param {string[]} args
  * @returns {number}
  */
-function runGitExitCode(workspaceFolder, args) {
-  const result = cp.spawnSync('git', args, {
-    cwd: workspaceFolder.uri.fsPath,
-    encoding: 'utf8'
-  })
 
-  if (result.error || typeof result.status !== 'number') return 1
-  return result.status
-}
 
 // â”€â”€â”€ Safe file I/O helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -667,11 +655,7 @@ function runGitExitCode(workspaceFolder, args) {
  * @param {string} content
  * @param {BufferEncoding} [encoding]
  */
-function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
-  const tmpPath = `${filePath}.tmp`
-  fs.writeFileSync(tmpPath, content, encoding)
-  fs.renameSync(tmpPath, filePath)
-}
+
 
 /**
  * Parse an ISO 8601 timestamp string into a numeric epoch ms value.
@@ -680,54 +664,13 @@ function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
  * @param {string | null | undefined} str
  * @returns {number}
  */
-function parseISODate(str) {
-  if (!str || typeof str !== 'string') return NaN
-  // Require at least YYYY-MM-DDTHH:MM prefix to reject locale date strings
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str)) return NaN
-  return Date.parse(str)
-}
+
 
 /**
  * Tokenise a command string into [program, ...args] without invoking a shell.
  * Handles quoted substrings (" and ') and backslash escapes within quotes.
  * Does NOT support shell operators (&&, ||, ;, |, $(), backticks) â€” use a
- * shell script file if you need composition in a health check command.
- * C1 fix: prevents shell injection via user-controlled .agentsync.json commands.
- * @param {string} cmd
- * @returns {string[]}
- */
-function parseCommandArgv(cmd) {
-  const args = []
-  let current = ''
-  let i = 0
-  while (i < cmd.length) {
-    const ch = cmd[i]
-    if (ch === '"' || ch === "'") {
-      const quote = ch
-      i++
-      while (i < cmd.length && cmd[i] !== quote) {
-        if (cmd[i] === '\\' && i + 1 < cmd.length) {
-          i++
-          current += cmd[i]
-        } else {
-          current += cmd[i]
-        }
-        i++
-      }
-      // skip closing quote (i++ at end of outer loop handles it)
-    } else if (ch === ' ' || ch === '\t') {
-      if (current.length > 0) {
-        args.push(current)
-        current = ''
-      }
-    } else {
-      current += ch
-    }
-    i++
-  }
-  if (current.length > 0) args.push(current)
-  return args
-}
+
 
 // â”€â”€â”€ Health checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -793,32 +736,7 @@ function runCheckCommand(workspaceFolder, command) {
   })
 }
 
-/**
- * Detect changed files for Hot Files using git.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string[]}
- */
-function detectHotFiles(workspaceFolder) {
-  const collected = new Set()
-  const addLines = (output) => {
-    if (!output) return
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .forEach((line) => collected.add(line))
-  }
 
-  addLines(runGit(workspaceFolder, ['diff', '--name-only']))
-  addLines(runGit(workspaceFolder, ['diff', '--cached', '--name-only']))
-  addLines(runGit(workspaceFolder, ['ls-files', '--others', '--exclude-standard']))
-
-  if (collected.size === 0) {
-    addLines(runGit(workspaceFolder, ['show', '--pretty=format:', '--name-only', 'HEAD']))
-  }
-
-  return [...collected].sort((a, b) => a.localeCompare(b))
-}
 
 /**
  * Execute configured health checks and return per-check status and output.
@@ -1035,6 +953,7 @@ function readTracker(workspaceFolder) {
 function writeTracker(workspaceFolder, content) {
   // C3: atomic write prevents partial-write corruption
   atomicWriteFileSync(getTrackerPath(workspaceFolder), content)
+  invalidateWorkspaceCaches(workspaceFolder)
 }
 
 // â”€â”€â”€ State file I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1048,8 +967,35 @@ function writeTracker(workspaceFolder, content) {
 function writeStateFile(workspaceFolder, data) {
   try {
     fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
+    const existingState = readStateFile(workspaceFolder) || {}
+    const existingIntegration =
+      existingState.integration && typeof existingState.integration === 'object'
+        ? existingState.integration
+        : {}
+    const snapshotMeta = getWorkspaceSnapshotService().getMetadata(workspaceFolder)
+    const previousVersion = Math.max(
+      0,
+      Number(existingIntegration?.snapshot?.version || 0)
+    )
+    const snapshotVersion = Math.max(previousVersion + 1, Number(snapshotMeta.version || 0), 1)
+    const snapshotHash =
+      snapshotMeta.hash ||
+      getWorkspaceSnapshotService().computeHash(JSON.stringify(data || {}))
+    const integration = {
+      ...existingIntegration,
+      ...(data?.integration && typeof data.integration === 'object' ? data.integration : {}),
+      snapshot: {
+        version: snapshotVersion,
+        hash: snapshotHash || null
+      }
+    }
+    const payload = {
+      ...data,
+      integration
+    }
     // C3: atomic write prevents partial-write corruption
-    atomicWriteFileSync(getStatePath(workspaceFolder), JSON.stringify(data, null, 2))
+    atomicWriteFileSync(getStatePath(workspaceFolder), JSON.stringify(payload, null, 2))
+    invalidateWorkspaceCaches(workspaceFolder)
   } catch (err) {
     // M4: log unexpected errors rather than silently swallowing them
     if (err && err.code !== 'ENOENT') console.error('[AgentSync] writeStateFile error:', err)
@@ -1146,29 +1092,7 @@ async function promptForAgent(defaultAgent) {
   return trimmed || null
 }
 
-/**
- * Normalize arbitrary text to a single trimmed line.
- * @param {string | undefined | null} value
- * @returns {string}
- */
-function toSingleLine(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
 
-/**
- * Truncate text while preserving a one-line shape.
- * @param {string} value
- * @param {number} maxLength
- * @returns {string}
- */
-function truncateSingleLine(value, maxLength) {
-  const line = toSingleLine(value)
-  if (!Number.isFinite(maxLength) || maxLength <= 0 || line.length <= maxLength) return line
-  if (maxLength <= 3) return line.slice(0, maxLength)
-  return `${line.slice(0, maxLength - 3).trimEnd()}...`
-}
 
 /**
  * Count health check outcomes for summary text.
@@ -1278,8 +1202,34 @@ function buildHandoffPromptLines(handoffRecord) {
   const summary = toSingleLine(handoffRecord.summary) || 'continue the current work'
   const mode = String(handoffRecord.owner_mode || '').toLowerCase()
 
+  // Model tier recommendation suffix
+  const modelTier = handoffRecord.recommended_model_tier || null
+  const modelJustification = toSingleLine(handoffRecord.model_justification || '')
+  let modelSuffix = ''
+  if (modelTier === 'worker') {
+    modelSuffix = ' [Worker-tier task: use a lighter model]'
+  } else if (modelTier === 'lead') {
+    modelSuffix = ' [Lead-tier task: use a capable model'
+    if (modelJustification) modelSuffix += ' \u2014 ' + modelJustification
+    modelSuffix += ']'
+  }
+
+  // Context hints suffix
+  const hints = handoffRecord.context_hints || null
+  let contextSuffix = ''
+  if (hints) {
+    const parts = []
+    if (Array.isArray(hints.entry_points) && hints.entry_points.length > 0) {
+      parts.push('entry points: ' + hints.entry_points.slice(0, 3).join(', '))
+    }
+    if (Array.isArray(hints.relevant_symbols) && hints.relevant_symbols.length > 0) {
+      parts.push('key symbols: ' + hints.relevant_symbols.slice(0, 5).join(', '))
+    }
+    if (parts.length > 0) contextSuffix = ' Context: ' + parts.join('; ') + '.'
+  }
+
   const buildLine = (targetLabel) =>
-    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json.`
+    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json + .agentsync/context-capsule.json.${modelSuffix}${contextSuffix}`
 
   if (mode === 'auto') {
     const caps = Array.isArray(handoffRecord.required_capabilities)
@@ -1472,9 +1422,37 @@ function findClaimableHandoff(workspaceFolder, agentId) {
 function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
   const store = readHandoffs(workspaceFolder)
   const now = new Date().toISOString()
+  const normalizedId = toSingleLine(handoffId)
   const canonical = canonicalAgentId(agentId)
+  if (!normalizedId) return { ok: false, reason: 'missing_handoff_id' }
+  if (!canonical) return { ok: false, reason: 'missing_agent' }
+
+  let result = { ok: false, reason: 'not_found' }
   const updated = store.handoffs.map((h) => {
-    if (toSingleLine(h?.handoff_id) !== handoffId) return h
+    if (toSingleLine(h?.handoff_id) !== normalizedId) return h
+
+    const currentStatus = String(h?.status || '').toLowerCase()
+    const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : []
+    const lastClaim =
+      Array.isArray(h?.state_history) && h.state_history.length > 0
+        ? h.state_history[h.state_history.length - 1]
+        : null
+    const claimedBy = lastClaim?.agent ? canonicalAgentId(lastClaim.agent) : null
+
+    if (currentStatus === 'in_progress') {
+      result = { ok: false, reason: 'already_claimed', claimedBy }
+      return h
+    }
+    if (currentStatus !== 'queued') {
+      result = { ok: false, reason: 'not_claimable', status: currentStatus || 'unknown' }
+      return h
+    }
+    if (owners.length > 0 && !owners.includes(canonical)) {
+      result = { ok: false, reason: 'not_assigned' }
+      return h
+    }
+
+    result = { ok: true, handoffId: normalizedId }
     return {
       ...h,
       status: 'in_progress',
@@ -1485,7 +1463,471 @@ function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
       ]
     }
   })
+  if (!result.ok) return result
+  const claimedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
+  if (claimedRecord) {
+    const validation = validateHandoff(claimedRecord)
+    if (!validation.valid) {
+      return { ok: false, reason: 'invalid_handoff', errors: validation.errors }
+    }
+  }
   writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
+  return result
+}
+
+const HANDOFF_ALLOWED_STATUSES = new Set([
+  'queued',
+  'in_progress',
+  'blocked',
+  'ready_for_review',
+  'approved',
+  'merged',
+  'escalated'
+])
+
+/**
+ * Normalize an input status to a supported handoff state.
+ * @param {string | null | undefined} status
+ * @param {string} fallback
+ * @returns {string}
+ */
+function normalizeHandoffStatus(status, fallback = 'queued') {
+  const normalized = String(status || '').toLowerCase().trim()
+  if (HANDOFF_ALLOWED_STATUSES.has(normalized)) return normalized
+  return fallback
+}
+
+/**
+ * Build a unique HO-YYYYMMDD-### id.
+ * @param {any[]} handoffs
+ * @param {string} now
+ * @returns {string}
+ */
+function buildHandoffId(handoffs, now) {
+  const dateStr = now.slice(0, 10).replace(/-/g, '')
+  const existing = new Set((handoffs || []).map((h) => toSingleLine(h?.handoff_id)))
+  let seq = Math.max(1, (handoffs || []).length + 1)
+  while (seq < 10000) {
+    const id = `HO-${dateStr}-${String(seq).padStart(3, '0')}`
+    if (!existing.has(id)) return id
+    seq += 1
+  }
+  return `HO-${dateStr}-${Date.now().toString().slice(-6)}`
+}
+
+/**
+ * Keep AgentTracker.md "Agent Handoffs" section in sync with the JSON source of truth.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ */
+function syncTrackerHandoffsSection(workspaceFolder) {
+  const content = readTracker(workspaceFolder)
+  if (!content) return
+  const { handoffs } = readHandoffs(workspaceFolder)
+  const updated = setSectionBody(
+    content,
+    'Agent Handoffs',
+    handoffs.length > 0 ? renderTrackerHandoffsSection(handoffs) : 'No open handoffs.'
+  )
+  writeTracker(workspaceFolder, updated)
+}
+
+/**
+ * Create and persist a handoff record.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {any} input
+ */
+function createHandoffRecord(workspaceFolder, input = {}) {
+  const store = readHandoffs(workspaceFolder)
+  const now = new Date().toISOString()
+  const fromAgent = canonicalAgentId(input.from_agent || input.agent || 'agency')
+  const toAgents = Array.isArray(input.to_agents)
+    ? input.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
+    : []
+  const requiredCaps = Array.isArray(input.required_capabilities)
+    ? input.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
+    : []
+  const skipReason =
+    input.no_handoff_reason !== null && input.no_handoff_reason !== undefined
+      ? toSingleLine(input.no_handoff_reason)
+      : null
+  const modeInput = String(input.owner_mode || '').toLowerCase()
+  let ownerMode = modeInput
+  if (!ownerMode) {
+    ownerMode = toAgents.length >= 2 ? 'shared' : toAgents.length === 1 ? 'single' : 'auto'
+  }
+
+  const record = {
+    handoff_id: toSingleLine(input.handoff_id) || buildHandoffId(store.handoffs, now),
+    task_id: toSingleLine(input.task_id) || null,
+    from_agent: fromAgent || 'agency',
+    to_agents: toAgents,
+    owner_mode: ownerMode,
+    status: normalizeHandoffStatus(input.status, 'queued'),
+    required_capabilities: requiredCaps,
+    summary: toSingleLine(input.summary) || (skipReason ? 'Handoff skipped by agent' : 'Agency handoff'),
+    notes: toSingleLine(input.notes || ''),
+    no_handoff_reason: skipReason || null,
+    files: Array.isArray(input.files) ? input.files.map((f) => toSingleLine(f)).filter(Boolean) : [],
+    branch: toSingleLine(input.branch) || null,
+    commit: toSingleLine(input.commit) || null,
+    prior_attempts: Number.isFinite(Number(input.prior_attempts))
+      ? Math.max(0, Math.round(Number(input.prior_attempts)))
+      : 0,
+    recommended_model_tier:
+      input.recommended_model_tier === 'lead' || input.recommended_model_tier === 'worker'
+        ? input.recommended_model_tier
+        : null,
+    model_justification: toSingleLine(input.model_justification) || null,
+    context_hints:
+      input.context_hints && typeof input.context_hints === 'object' ? input.context_hints : null,
+    source_system: toSingleLine(input.source_system) || null,
+    source_run_id: toSingleLine(input.source_run_id) || null,
+    source_event_id: toSingleLine(input.source_event_id) || null,
+    created_at: now,
+    updated_at: now,
+    state_history: [
+      {
+        status: normalizeHandoffStatus(input.status, 'queued'),
+        agent: fromAgent || 'agency',
+        timestamp: now,
+        reason: skipReason ? 'created (skip)' : 'created'
+      }
+    ]
+  }
+
+  if (skipReason) {
+    record.owner_mode = 'auto'
+    record.to_agents = []
+    if (!record.required_capabilities.length) {
+      record.required_capabilities = ['skip-handoff']
+    }
+  } else if (record.owner_mode === 'single' && record.to_agents.length !== 1) {
+    record.owner_mode = 'auto'
+    record.to_agents = []
+    if (record.required_capabilities.length === 0) record.required_capabilities = ['handoff']
+  } else if (record.owner_mode === 'shared' && record.to_agents.length !== 2) {
+    record.owner_mode = 'auto'
+    record.to_agents = []
+    if (record.required_capabilities.length === 0) record.required_capabilities = ['handoff']
+  } else if (record.owner_mode === 'auto' && record.required_capabilities.length === 0) {
+    record.required_capabilities = ['handoff']
+  }
+
+  const { valid, errors } = validateHandoff(record)
+  if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
+
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: [...store.handoffs, record] })
+  syncTrackerHandoffsSection(workspaceFolder)
+  return record
+}
+
+/**
+ * Transition an existing handoff to a new status.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} handoffId
+ * @param {string} status
+ * @param {string} agentId
+ * @param {string | null} reason
+ */
+function completeHandoffRecord(workspaceFolder, handoffId, status, agentId, reason = null) {
+  const normalizedId = toSingleLine(handoffId)
+  const nextStatus = normalizeHandoffStatus(status, 'merged')
+  const actor = canonicalAgentId(agentId)
+  if (!normalizedId) return { ok: false, reason: 'missing_handoff_id' }
+  if (!actor) return { ok: false, reason: 'missing_agent' }
+
+  const store = readHandoffs(workspaceFolder)
+  const now = new Date().toISOString()
+  let found = false
+  const updated = store.handoffs.map((h) => {
+    if (toSingleLine(h?.handoff_id) !== normalizedId) return h
+    found = true
+    return {
+      ...h,
+      status: nextStatus,
+      updated_at: now,
+      state_history: [
+        ...(Array.isArray(h.state_history) ? h.state_history : []),
+        {
+          status: nextStatus,
+          agent: actor,
+          timestamp: now,
+          reason: toSingleLine(reason) || 'completed via agentsync'
+        }
+      ]
+    }
+  })
+  if (!found) return { ok: false, reason: 'not_found' }
+  const completedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
+  if (completedRecord) {
+    const validation = validateHandoff(completedRecord)
+    if (!validation.valid) {
+      return { ok: false, reason: 'invalid_handoff', errors: validation.errors }
+    }
+  }
+
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
+  syncTrackerHandoffsSection(workspaceFolder)
+  return { ok: true, handoffId: normalizedId, status: nextStatus }
+}
+
+/**
+ * Read all handoff records.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ */
+function listHandoffRecords(workspaceFolder) {
+  const store = readHandoffs(workspaceFolder)
+  return store.handoffs
+}
+
+/**
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ */
+function getAgencySyncPaths(workspaceFolder) {
+  const base = path.join(workspaceFolder.uri.fsPath, '.agencysync')
+  return {
+    base,
+    runs: path.join(base, 'runs.json'),
+    events: path.join(base, 'events')
+  }
+}
+
+/**
+ * Parse a JSON file and return null on failure.
+ * @param {string} filePath
+ * @returns {any | null}
+ */
+function tryReadJson(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '')
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * @param {string} dirPath
+ * @returns {string[]}
+ */
+function listJsonFilesRecursive(dirPath) {
+  if (!fs.existsSync(dirPath)) return []
+  const files = []
+  /** @param {string} current */
+  const walk = (current) => {
+    const entries = fs.readdirSync(current, { withFileTypes: true })
+    for (const entry of entries) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.json')) files.push(full)
+    }
+  }
+  walk(dirPath)
+  return files
+}
+
+/**
+ * Normalize an Agency run/event object into an AgentSync handoff candidate.
+ * @param {any} raw
+ * @param {{ sourceRunId?: string | null, sourceEventId?: string | null }} [meta]
+ */
+function normalizeAgencyCandidate(raw, meta = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  const toAgents = Array.isArray(raw.to_agents || raw.owners || raw.assignees)
+    ? (raw.to_agents || raw.owners || raw.assignees)
+    : []
+  const requiredCaps = Array.isArray(raw.required_capabilities || raw.capabilities)
+    ? (raw.required_capabilities || raw.capabilities)
+    : []
+  const sourceRunId = toSingleLine(raw.run_id || raw.runId || meta.sourceRunId || '') || null
+  const sourceEventId = toSingleLine(raw.event_id || raw.eventId || meta.sourceEventId || '') || null
+
+  const modeInput = String(raw.owner_mode || '').toLowerCase()
+  const ownerMode = modeInput || (toAgents.length >= 2 ? 'shared' : toAgents.length === 1 ? 'single' : 'auto')
+  const normalizedMode = ownerMode === 'single' || ownerMode === 'shared' || ownerMode === 'auto' ? ownerMode : 'auto'
+
+  return {
+    handoff_id: toSingleLine(raw.handoff_id || raw.handoffId || ''),
+    task_id: toSingleLine(raw.task_id || raw.taskId || raw.id || ''),
+    from_agent: canonicalAgentId(raw.from_agent || raw.agent || raw.source_agent || 'agency'),
+    to_agents: toAgents.map((a) => canonicalAgentId(a)).filter(Boolean),
+    owner_mode: normalizedMode,
+    status: normalizeHandoffStatus(raw.status || raw.state, 'queued'),
+    required_capabilities: requiredCaps.map((c) => toSingleLine(c)).filter(Boolean),
+    summary: toSingleLine(raw.summary || raw.title || raw.message || ''),
+    notes: toSingleLine(raw.notes || raw.description || ''),
+    files: Array.isArray(raw.files || raw.changed_files)
+      ? (raw.files || raw.changed_files).map((f) => toSingleLine(f)).filter(Boolean)
+      : [],
+    branch: toSingleLine(raw.branch || ''),
+    commit: toSingleLine(raw.commit || raw.sha || ''),
+    no_handoff_reason: toSingleLine(raw.no_handoff_reason || '') || null,
+    source_system: 'agencysync',
+    source_run_id: sourceRunId,
+    source_event_id: sourceEventId
+  }
+}
+
+/**
+ * Sync .agencysync run/event artifacts into AgentSync handoffs.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @returns {{ synced: number, created: number, updated: number, errors: string[] }}
+ */
+function syncAgencyRunsCore(workspaceFolder) {
+  const paths = getAgencySyncPaths(workspaceFolder)
+  const errors = []
+  if (!fs.existsSync(paths.base)) {
+    return { synced: 0, created: 0, updated: 0, errors }
+  }
+
+  const candidates = []
+  const runsData = tryReadJson(paths.runs)
+  if (Array.isArray(runsData)) {
+    runsData.forEach((run, index) => {
+      const candidate = normalizeAgencyCandidate(run, {
+        sourceRunId: toSingleLine(run?.id || run?.run_id || index + 1) || null
+      })
+      if (candidate) candidates.push(candidate)
+    })
+  }
+
+  const eventFiles = listJsonFilesRecursive(paths.events)
+  for (const filePath of eventFiles) {
+    const eventData = tryReadJson(filePath)
+    const sourceEventId = path.relative(paths.events, filePath).replace(/\\/g, '/')
+    const rows = Array.isArray(eventData) ? eventData : eventData ? [eventData] : []
+    rows.forEach((row, index) => {
+      const candidate = normalizeAgencyCandidate(row, {
+        sourceEventId: `${sourceEventId}#${index + 1}`,
+        sourceRunId: toSingleLine(row?.run_id || row?.runId || '') || null
+      })
+      if (candidate) candidates.push(candidate)
+    })
+  }
+
+  if (candidates.length === 0) {
+    const state = readStateFile(workspaceFolder) || {}
+    const integration = {
+      ...(state.integration && typeof state.integration === 'object' ? state.integration : {}),
+      lastAgencySyncAt: new Date().toISOString()
+    }
+    writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: new Date().toISOString() })
+    return { synced: 0, created: 0, updated: 0, errors }
+  }
+
+  const store = readHandoffs(workspaceFolder)
+  let created = 0
+  let updatedCount = 0
+  const now = new Date().toISOString()
+  const next = [...store.handoffs]
+
+  const resolveExistingIndex = (candidate) => {
+    const cid = toSingleLine(candidate.handoff_id)
+    if (cid) {
+      const byId = next.findIndex((h) => toSingleLine(h?.handoff_id) === cid)
+      if (byId >= 0) return byId
+    }
+    if (candidate.source_event_id) {
+      const byEvent = next.findIndex((h) => toSingleLine(h?.source_event_id) === candidate.source_event_id)
+      if (byEvent >= 0) return byEvent
+    }
+    if (candidate.source_run_id && candidate.task_id) {
+      const byRunTask = next.findIndex(
+        (h) =>
+          toSingleLine(h?.source_run_id) === candidate.source_run_id &&
+          toSingleLine(h?.task_id) === candidate.task_id
+      )
+      if (byRunTask >= 0) return byRunTask
+    }
+    return -1
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const idx = resolveExistingIndex(candidate)
+      if (idx >= 0) {
+        const existing = next[idx]
+        const merged = {
+          ...existing,
+          ...candidate,
+          handoff_id: toSingleLine(existing.handoff_id || candidate.handoff_id || '') || buildHandoffId(next, now),
+          task_id: toSingleLine(existing.task_id || candidate.task_id) || null,
+          from_agent: canonicalAgentId(candidate.from_agent || existing.from_agent || 'agency'),
+          to_agents:
+            Array.isArray(candidate.to_agents) && candidate.to_agents.length > 0
+              ? candidate.to_agents
+              : Array.isArray(existing.to_agents)
+                ? existing.to_agents
+                : [],
+          owner_mode:
+            candidate.owner_mode ||
+            existing.owner_mode ||
+            (Array.isArray(candidate.to_agents) && candidate.to_agents.length >= 2
+              ? 'shared'
+              : Array.isArray(candidate.to_agents) && candidate.to_agents.length === 1
+                ? 'single'
+                : 'auto'),
+          required_capabilities:
+            Array.isArray(candidate.required_capabilities) && candidate.required_capabilities.length > 0
+              ? candidate.required_capabilities
+              : Array.isArray(existing.required_capabilities)
+                ? existing.required_capabilities
+                : [],
+          summary: candidate.summary || existing.summary || 'Agency handoff',
+          notes: candidate.notes || existing.notes || '',
+          updated_at: now,
+          created_at: existing.created_at || now,
+          state_history: [
+            ...(Array.isArray(existing.state_history) ? existing.state_history : []),
+            {
+              status: normalizeHandoffStatus(candidate.status || existing.status, 'queued'),
+              agent: canonicalAgentId(candidate.from_agent || existing.from_agent || 'agency'),
+              timestamp: now,
+              reason: 'synced from .agencysync'
+            }
+          ]
+        }
+        if (merged.no_handoff_reason) {
+          merged.owner_mode = 'auto'
+          merged.to_agents = []
+          if (!Array.isArray(merged.required_capabilities) || merged.required_capabilities.length === 0) {
+            merged.required_capabilities = ['skip-handoff']
+          }
+        } else if (merged.owner_mode === 'auto' && merged.required_capabilities.length === 0) {
+          merged.required_capabilities = ['handoff']
+        }
+        const validation = validateHandoff(merged)
+        if (!validation.valid) throw new Error(validation.errors.join('; '))
+        next[idx] = merged
+        updatedCount += 1
+      } else {
+        const createdRecord = createHandoffRecord(workspaceFolder, {
+          ...candidate,
+          summary: candidate.summary || 'Agency handoff',
+          notes: candidate.notes || '',
+          source_system: 'agencysync'
+        })
+        next.push(createdRecord)
+        created += 1
+      }
+    } catch (err) {
+      errors.push(err && err.message ? err.message : 'Unknown agency sync error')
+    }
+  }
+
+  // createHandoffRecord writes directly, so only perform a final write for in-memory updates.
+  if (updatedCount > 0) {
+    writeHandoffs(workspaceFolder, { version: 1, handoffs: next })
+  }
+  syncTrackerHandoffsSection(workspaceFolder)
+
+  const state = readStateFile(workspaceFolder) || {}
+  const integration = {
+    ...(state.integration && typeof state.integration === 'object' ? state.integration : {}),
+    lastAgencySyncAt: now
+  }
+  writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: now })
+  return { synced: candidates.length, created, updated: updatedCount, errors }
 }
 
 // â”€â”€â”€ Core session logic (headless â€” no VS Code UI) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1546,6 +1988,12 @@ function startSessionCore(workspaceFolder, agent, goal) {
       goal: normalizedGoal,
       startedAt: new Date().toISOString()
     },
+    sessionMetrics: {
+      filesOpened: 0,
+      filesModified: 0,
+      commandsRun: 0,
+      startedAt: new Date().toISOString()
+    },
     lastSession,
     hotFiles: [],
     inProgress: updatedInProgressLines
@@ -1584,7 +2032,14 @@ async function endSessionCore(
   const commit = runGit(workspaceFolder, ['rev-parse', '--short', 'HEAD']) || PLACEHOLDER
   const hotFiles = Array.isArray(options.hotFiles)
     ? options.hotFiles
-    : detectHotFiles(workspaceFolder)
+    : getHotFilesCached(workspaceFolder, { force: true })
+  const signatureChanges = detectSignatureChanges(workspaceFolder, hotFiles)
+  const complexityInfo = scoreNextTaskCapabilities(
+    hotFiles,
+    signatureChanges,
+    state?.sessionMetrics || {},
+    state?.priorAttempts || 0
+  )
 
   // M1: await the now-async health checks so the host is not blocked
   let health = options.healthResults
@@ -1700,6 +2155,22 @@ async function endSessionCore(
     )
   }
 
+  if (signatureChanges.length > 0) {
+    const existingGotchas = getSectionBody(content, 'Known Issues & Gotchas')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith('<!--'))
+      .filter((line) => line)
+    const sigLines = signatureChanges.map(
+      ({ file, change }) =>
+        `- ⚠ Signature change in \`${file}\`: \`${change.trim().slice(0, 120)}\``
+    )
+    content = setSectionBody(
+      content,
+      'Known Issues & Gotchas',
+      [...existingGotchas, ...sigLines].join('\n')
+    )
+  }
   // Persist handoff record if provided
   let handoffRecord = null
   let generatedPromptLines = []
@@ -1721,11 +2192,11 @@ async function endSessionCore(
         task_id: null,
         from_agent: canonicalAgentId(agent),
         to_agents: [],
-        owner_mode: 'single',
+        owner_mode: 'auto',
         status: 'queued',
-        required_capabilities: [],
-        summary: '',
-        notes: '',
+        required_capabilities: ['skip-handoff'],
+        summary: 'Handoff skipped by agent',
+        notes: toSingleLine(handoffData.notes || ''),
         no_handoff_reason: skipReason,
         files: hotFiles,
         branch,
@@ -1741,7 +2212,14 @@ async function endSessionCore(
           { status: 'queued', agent: canonicalAgentId(agent), timestamp: now, reason: 'skipped' }
         ]
       }
+      const { valid, errors } = validateHandoff(handoffRecord)
+      if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
     } else {
+      // Determine model tier recommendation based on task complexity
+      const modelTier = handoffData.recommended_model_tier || null
+      const modelJustification = handoffData.model_justification || null
+      const contextHints = handoffData.context_hints || null
+
       // Full handoff record
       handoffRecord = {
         handoff_id: handoffId,
@@ -1754,6 +2232,9 @@ async function endSessionCore(
         summary: toSingleLine(handoffData.summary || normalizedSummary || 'Session update'),
         notes: toSingleLine(handoffData.notes || ''),
         no_handoff_reason: null,
+        recommended_model_tier: modelTier,
+        model_justification: modelJustification ? toSingleLine(modelJustification) : null,
+        context_hints: contextHints,
         files: hotFiles,
         branch,
         commit,
@@ -1819,12 +2300,18 @@ async function endSessionCore(
   const shouldWriteAutomationState =
     automationFeatureEnabled &&
     (automationUsed || summarySource === 'deterministic' || generatedPromptLines.length > 0)
+  const existingMetrics = readStateFile(workspaceFolder)?.sessionMetrics || {}
   const stateLastSession = {
     agent,
     date: now,
     summary: persistedSummary,
     branch,
-    commit
+    commit,
+    sessionMetrics: {
+      filesModified: existingMetrics.filesModified || 0,
+      commandsRun: existingMetrics.commandsRun || 0,
+      durationMs: Date.now() - (parseISODate(existingMetrics.startedAt) || Date.now())
+    }
   }
 
   if (shouldWriteAutomationState) {
@@ -1859,7 +2346,9 @@ async function endSessionCore(
     generatedSummary: normalizedSummary || persistedSummary,
     summarySource,
     handoffPrompts: generatedPromptLines,
-    promptCopiedToClipboard: false
+    promptCopiedToClipboard: false,
+    signatureChanges,
+    complexityInfo
   }
 }
 
@@ -1926,6 +2415,11 @@ function clearActiveSessionCore(workspaceFolder) {
 //   endSession    { action, agent, summary?, nextWork?, handoff? }
 //   status        { action }
 //   health        { action }
+//   listHandoffs  { action }
+//   claimHandoff  { action, handoffId, agent }
+//   completeHandoff { action, handoffId, agent, status?, reason? }
+//   createHandoff { action, handoff }
+//   syncAgencyRuns { action }
 //
 // Example (from a terminal agent):
 //   echo '{"action":"startSession","agent":"Claude","goal":"Fix login bug"}' \
@@ -1994,6 +2488,11 @@ async function processDropZoneRequest(workspaceFolder) {
         const { agent, goal } = request
         if (!agent) throw new Error('Missing required field: agent')
         startSessionCore(workspaceFolder, agent, goal || 'Session started')
+        const state = readStateFile(workspaceFolder)
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1
+          writeStateFile(workspaceFolder, state)
+        }
         writeResultFile(workspaceFolder, { ok: true, action, timestamp })
         break
       }
@@ -2001,6 +2500,11 @@ async function processDropZoneRequest(workspaceFolder) {
       case 'endSession': {
         const { agent, summary, nextWork, handoff } = request
         if (!agent) throw new Error('Missing required field: agent')
+        const state = readStateFile(workspaceFolder)
+        if (state?.sessionMetrics) {
+          state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1
+          writeStateFile(workspaceFolder, state)
+        }
         const hasProvidedSummary = typeof summary === 'string' && toSingleLine(summary).length > 0
         const zeroTouchEnabled =
           readAgentSyncConfig(workspaceFolder).automation?.endSessionZeroTouch?.enabled === true
@@ -2065,6 +2569,91 @@ async function processDropZoneRequest(workspaceFolder) {
         break
       }
 
+      case 'listHandoffs': {
+        const handoffs = listHandoffRecords(workspaceFolder)
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { count: handoffs.length, handoffs }
+        })
+        break
+      }
+
+      case 'claimHandoff': {
+        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id)
+        const agent = toSingleLine(request?.agent)
+        if (!handoffId) throw new Error('Missing required field: handoffId')
+        if (!agent) throw new Error('Missing required field: agent')
+        const result = claimHandoffRecord(workspaceFolder, handoffId, agent)
+        if (!result.ok) {
+          writeResultFile(workspaceFolder, {
+            ok: false,
+            action,
+            timestamp,
+            error: result.reason || 'claim failed',
+            data: result
+          })
+          break
+        }
+        syncTrackerHandoffsSection(workspaceFolder)
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: result
+        })
+        break
+      }
+
+      case 'completeHandoff': {
+        const handoffId = toSingleLine(request?.handoffId || request?.handoff_id)
+        const agent = toSingleLine(request?.agent)
+        const status = toSingleLine(request?.status || 'merged') || 'merged'
+        const reason = toSingleLine(request?.reason || '') || null
+        if (!handoffId) throw new Error('Missing required field: handoffId')
+        if (!agent) throw new Error('Missing required field: agent')
+        const result = completeHandoffRecord(workspaceFolder, handoffId, status, agent, reason)
+        if (!result.ok) {
+          writeResultFile(workspaceFolder, {
+            ok: false,
+            action,
+            timestamp,
+            error: result.reason || 'complete failed',
+            data: result
+          })
+          break
+        }
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: result
+        })
+        break
+      }
+
+      case 'createHandoff': {
+        const handoff = request?.handoff
+        if (!handoff || typeof handoff !== 'object') {
+          throw new Error('Missing required field: handoff')
+        }
+        const created = createHandoffRecord(workspaceFolder, handoff)
+        writeResultFile(workspaceFolder, {
+          ok: true,
+          action,
+          timestamp,
+          data: { handoff: created }
+        })
+        break
+      }
+
+      case 'syncAgencyRuns': {
+        const data = syncAgencyRunsCore(workspaceFolder)
+        writeResultFile(workspaceFolder, { ok: true, action, timestamp, data })
+        break
+      }
+
       default:
         throw new Error(`Unknown action: ${action || '(none)'}`)
     }
@@ -2083,50 +2672,20 @@ async function processDropZoneRequest(workspaceFolder) {
 
 // â”€â”€â”€ Tree view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Format a duration in milliseconds as a human-readable elapsed string.
- * @param {number} ms
- * @returns {string}
- */
-function formatElapsed(ms) {
-  const totalMinutes = Math.floor(ms / 60000)
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
-}
+
 
 /**
  * Build a normalized snapshot for the live webview dashboard.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  */
 function getDashboardModel(workspaceFolder, viewMode = 'compact') {
-  const trackerContent = readTracker(workspaceFolder)
-  const tracker = trackerContent
-    ? parseTracker(trackerContent)
-    : {
-        agent: PLACEHOLDER,
-        date: PLACEHOLDER,
-        summary: PLACEHOLDER,
-        branch: PLACEHOLDER,
-        commit: PLACEHOLDER
-      }
-
-  let state = null
-  const statePath = getStatePath(workspaceFolder)
-  if (fs.existsSync(statePath)) {
-    try {
-      state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-    } catch {}
-  }
-
-  const config = readAgentSyncConfig(workspaceFolder)
-  const handoffInfo = readHandoffs(workspaceFolder)
-  // Prefer inProgress from state.json (written by start/end session) over MD parsing.
-  // Fall back to MD parsing for workspaces that haven't written state.json yet.
-  const inProgressLines =
-    Array.isArray(state?.inProgress) && state.inProgress.length > 0
-      ? state.inProgress
-      : getInProgressLines(trackerContent)
+  const snapshot = getWorkspaceSnapshot(workspaceFolder)
+  const trackerContent = snapshot.trackerContent
+  const tracker = snapshot.tracker
+  const state = snapshot.state
+  const config = snapshot.config
+  const handoffInfo = snapshot.handoffInfo
+  const inProgressLines = snapshot.inProgressLines
   const currentAgentId = canonicalAgentId(
     state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
   )
@@ -2140,6 +2699,21 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
     autoStaleSessionMinutes
   )
   const warnings = trackerContent ? getTrackerWarnings(workspaceFolder, tracker) : []
+
+  // Session duration warning from tokenBudget config
+  const sessionWarnMinutes = config.tokenBudget?.sessionDurationWarningMinutes || 0
+  if (sessionWarnMinutes > 0 && state?.sessionActive && state?.activeSession?.startedAt) {
+    const started = parseISODate(state.activeSession.startedAt)
+    if (Number.isFinite(started)) {
+      const ageMinutes = (Date.now() - started) / 60000
+      if (ageMinutes >= sessionWarnMinutes) {
+        warnings.push(
+          `Session running ${formatElapsed(Date.now() - started)} \u2014 consider ending and handing off to reduce context size.`
+        )
+      }
+    }
+  }
+  const hotFiles = new Set(getHotFilesCached(workspaceFolder).map(normalizeRepoRelativePath))
   const getSuggestedNextStep = () => {
     if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.'
     if (state?.sessionActive)
@@ -2176,7 +2750,7 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
     owners: Array.isArray(h?.to_agents) ? h.to_agents : []
   })
   // Full card data for interactive dashboard actions (Claim / Start / Skip)
-  const summarizeHandoffCard = (h) => {
+  const summarizeHandoffCard = (h, stale = false) => {
     const files = Array.isArray(h?.files) ? h.files : []
     const toAgents = Array.isArray(h?.to_agents) ? h.to_agents : []
     return {
@@ -2189,7 +2763,10 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
           ? files.slice(0, 3).join(', ') + ' (+' + (files.length - 3) + ' more)'
           : files.join(', ') || 'none',
       status: String(h?.status || 'queued'),
-      notes: String(h?.notes || '')
+      notes: String(h?.notes || ''),
+      recommended_model_tier: h?.recommended_model_tier || null,
+      model_justification: String(h?.model_justification || ''),
+      stale_observation: stale
     }
   }
   const compactTasks = inProgressLines.slice(0, 2)
@@ -2208,12 +2785,24 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
   }
   const normalizedViewMode = viewMode === 'full' ? 'full' : 'compact'
 
+  const defaultShortcuts = [
+    'agentsync.startSession',
+    'agentsync.endSession',
+    'agentsync.openTracker',
+    'agentsync.contextStatus'
+  ]
+  const shortcuts =
+    Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0
+      ? config.dashboardShortcuts
+      : defaultShortcuts
+
   return {
     hasWorkspace: true,
     workspace: workspaceFolder.name,
     ui: {
       viewMode: normalizedViewMode
     },
+    shortcuts,
     state: {
       key: opsState.key,
       label: opsState.label,
@@ -2258,9 +2847,78 @@ function getDashboardModel(workspaceFolder, viewMode = 'compact') {
       queued: handoffBuckets.assignedToMe
         .filter((h) => String(h?.status || '').toLowerCase() === 'queued')
         .slice(0, 10)
-        .map(summarizeHandoffCard)
+        .map((h) => {
+          const isStale = (h.files || []).some((file) =>
+            hotFiles.has(normalizeRepoRelativePath(file))
+          )
+          return summarizeHandoffCard(h, isStale)
+        })
     }
   }
+}
+
+/**
+ * Build and persist a deterministic context capsule for downstream agents.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @returns {any}
+ */
+function generateContextCapsule(workspaceFolder) {
+  const snapshot = getWorkspaceSnapshot(workspaceFolder, { force: true })
+  const state = snapshot.state || null
+  const tracker = snapshot.tracker || {
+    agent: PLACEHOLDER,
+    date: PLACEHOLDER,
+    summary: PLACEHOLDER,
+    branch: PLACEHOLDER,
+    commit: PLACEHOLDER
+  }
+  const handoffInfo = snapshot.handoffInfo || { handoffs: [] }
+  const config = snapshot.config || {}
+  const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS
+  const currentAgentId = canonicalAgentId(
+    state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
+  )
+  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentAgentId, staleAfterHours)
+  const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0
+  const opsState = getOperationalState(
+    state,
+    snapshot.inProgressLines || [],
+    handoffInfo.handoffs || [],
+    autoStaleSessionMinutes
+  )
+  const hotFiles = getHotFilesCached(workspaceFolder, { force: true })
+  const capsule = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    workspace: workspaceFolder.name,
+    state: opsState,
+    session: {
+      active: Boolean(state?.sessionActive),
+      activeSession: state?.activeSession || null,
+      lastSession: state?.lastSession || null,
+      metrics: state?.sessionMetrics || null
+    },
+    tracker: {
+      agent: tracker.agent,
+      date: tracker.date,
+      summary: tracker.summary,
+      branch: tracker.branch,
+      commit: tracker.commit
+    },
+    hotFiles,
+    inProgress: snapshot.inProgressLines || [],
+    handoffs: {
+      openCount: handoffBuckets.open.length,
+      assignedToMe: handoffBuckets.assignedToMe.slice(0, 20),
+      sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 20),
+      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 20)
+    },
+    warnings: getTrackerWarnings(workspaceFolder, tracker)
+  }
+  fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
+  atomicWriteFileSync(getContextCapsulePath(workspaceFolder), JSON.stringify(capsule, null, 2))
+  invalidateWorkspaceCaches(workspaceFolder)
+  return capsule
 }
 
 /**
@@ -2613,6 +3271,9 @@ function getDashboardHtml() {
       <div id="compactMoreActions" class="compact-more-actions">
         <button class="action compact-action" data-command="agentsync.init">Initialize Workspace</button>
         <button class="action compact-action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action compact-action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
+        <button class="action compact-action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
+        <button class="action compact-action" data-command="agentsync.contextStatus">Context Status</button>
         <button class="action compact-action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
         <button class="action compact-action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
@@ -2626,6 +3287,9 @@ function getDashboardHtml() {
         <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
         <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
         <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
+        <button class="action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
+        <button class="action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
+        <button class="action" data-command="agentsync.contextStatus">Context Status</button>
         <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
         <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
       </div>
@@ -2722,6 +3386,9 @@ function getDashboardHtml() {
       'agentsync.clearActiveSession': 'Clear Active Session',
       'agentsync.openTracker': 'Open AgentTracker',
       'agentsync.openHandoffs': 'Open Handoffs JSON',
+      'agentsync.contextCapsule': 'Generate Context Capsule',
+      'agentsync.syncAgencyRuns': 'Sync Agency Runs',
+      'agentsync.contextStatus': 'Context Status',
       'agentsync.openTutorial': 'Open Interactive Tutorial',
       'agentsync.refreshPanel': 'Refresh'
     };
@@ -2732,6 +3399,9 @@ function getDashboardHtml() {
       'agentsync.clearActiveSession': '#ff6c74',
       'agentsync.openTracker': '#8ab4ff',
       'agentsync.openHandoffs': '#8ab4ff',
+      'agentsync.contextCapsule': '#7fd8ff',
+      'agentsync.syncAgencyRuns': '#7ccf8a',
+      'agentsync.contextStatus': '#c59cff',
       'agentsync.openTutorial': '#8ab4ff',
       'agentsync.refreshPanel': '#3dd6d0'
     };
@@ -2793,6 +3463,29 @@ function getDashboardHtml() {
 
     function getCommandColor(command) {
       return commandColors[command] || '#c8d2d8';
+    }
+
+    function renderShortcuts(shortcuts) {
+      const makeButton = (cmd) => {
+        const btn = document.createElement('button');
+        btn.className = 'action';
+        btn.setAttribute('data-command', cmd);
+        const fallbackLabel = cmd.includes('.') ? cmd.slice(cmd.lastIndexOf('.') + 1) : cmd;
+        btn.textContent = commandLabels[cmd] || fallbackLabel;
+        const color = getCommandColor(cmd);
+        btn.style.setProperty('--button-color', color);
+        return btn;
+      };
+      const compactContainer = document.querySelector('.compact-actions');
+      const fullContainer = document.querySelector('.actions');
+      [compactContainer, fullContainer].forEach((container) => {
+        if (!container) return;
+        container.innerHTML = '';
+        shortcuts.forEach((cmd) => {
+          const btn = makeButton(cmd);
+          container.appendChild(btn);
+        });
+      });
     }
 
     function clearActiveCommandHighlight() {
@@ -2932,6 +3625,22 @@ function getDashboardHtml() {
         metaEl.textContent = 'From: ' + item.from_agent + ' | To: ' + item.to_agents_display + ' | Files: ' + item.files_display;
         card.appendChild(metaEl);
 
+        if (item.recommended_model_tier) {
+          const tierEl = document.createElement('span');
+          tierEl.style.cssText = 'display:inline-block;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-top:4px;' +
+            (item.recommended_model_tier === 'lead' ? 'background:#ffb347;color:#1a1a1a;' : 'background:#3dd6d0;color:#1a1a1a;');
+          tierEl.textContent = item.recommended_model_tier === 'lead' ? 'Lead Model' : 'Worker Model';
+          if (item.model_justification) tierEl.title = item.model_justification;
+          card.appendChild(tierEl);
+        }
+
+        if (item.stale_observation) {
+          const staleEl = document.createElement('div');
+          staleEl.style.cssText = 'background: #ffb347; color: #1a1a1a; padding: 2px 6px; border-radius: 3px; font-size: 0.75em; margin-top: 4px;';
+          staleEl.textContent = '⚠ Context may be outdated — re-read these files';
+          card.appendChild(staleEl);
+        }
+
         if (item.notes) {
           const notesEl = document.createElement('div');
           notesEl.className = 'handoff-card-meta';
@@ -3032,6 +3741,7 @@ function getDashboardHtml() {
         setCompactMoreOpen(false);
         clearActiveCommandHighlight();
         setActionsBusy(false);
+        renderShortcuts([]);
         setText('stateText', 'No workspace open');
         setText('nextStep', 'Open a folder/workspace to use AgentSync.');
         setText('compactFocus', 'No workspace open');
@@ -3041,6 +3751,7 @@ function getDashboardHtml() {
       }
 
       setViewMode(model.ui && model.ui.viewMode);
+      renderShortcuts(model.shortcuts || []);
 
       document.body.dataset.state = model.state.key;
       const badge = byId('stateBadge');
@@ -3338,13 +4049,21 @@ async function handleHandoffAction(workspaceFolder, action, handoffId, context) 
   const currentAgent = state?.activeSession?.agent || state?.lastSession?.agent || ''
 
   if (action === 'claim') {
-    claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
-    vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`)
+    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
+    if (result.ok) {
+      syncTrackerHandoffsSection(workspaceFolder)
+      vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`)
+    } else {
+      vscode.window.showWarningMessage(
+        `AgentSync: Could not claim ${normalizedId} (${result.reason || 'unknown reason'}).`
+      )
+    }
   } else if (action === 'start') {
     const { handoffs } = readHandoffs(workspaceFolder)
     const handoff = handoffs.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
     const goalPreFill = handoff ? toSingleLine(handoff.summary) : ''
-    claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
+    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
+    if (result.ok) syncTrackerHandoffsSection(workspaceFolder)
     await startSession(context, { goalPreFill, agentPreFill: currentAgent })
   } else if (action === 'skip') {
     const store = readHandoffs(workspaceFolder)
@@ -3367,6 +4086,7 @@ async function handleHandoffAction(workspaceFolder, action, handoffId, context) 
       }
     })
     writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
+    syncTrackerHandoffsSection(workspaceFolder)
     vscode.window.showInformationMessage(`AgentSync: Handoff ${normalizedId} marked as skipped.`)
   }
 }
@@ -3435,18 +4155,12 @@ class AgentSyncTreeDataProvider {
       ]
     }
 
-    let state = null
-    const statePath = getStatePath(workspaceFolder)
-    if (fs.existsSync(statePath)) {
-      try {
-        state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-      } catch {}
-    }
-
-    const config = readAgentSyncConfig(workspaceFolder)
-    const handoffInfo = readHandoffs(workspaceFolder)
-    const trackerContent = readTracker(workspaceFolder)
-    const inProgressLines = getInProgressLines(trackerContent)
+    const snapshot = getWorkspaceSnapshot(workspaceFolder)
+    const state = snapshot.state
+    const config = snapshot.config
+    const handoffInfo = snapshot.handoffInfo
+    const trackerContent = snapshot.trackerContent
+    const inProgressLines = snapshot.inProgressLines
     const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0
     const staleInfo = getSessionStaleInfo(state, autoStaleSessionMinutes)
     const opsState = getOperationalState(
@@ -3584,6 +4298,12 @@ class AgentSyncTreeDataProvider {
           'agentsync.openHandoffs',
           'json',
           'Open machine-readable handoff data'
+        ),
+        action(
+          'Context Status',
+          'agentsync.contextStatus',
+          'info',
+          'Show session metrics and context health'
         ),
         action(
           'Open Interactive Tutorial',
@@ -3830,15 +4550,7 @@ class AgentSyncTreeDataProvider {
 
 // â”€â”€â”€ Status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Format text prefix for multi-root workspaces.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string}
- */
-function getWorkspaceLabelPrefix(workspaceFolder) {
-  const count = vscode.workspace.workspaceFolders?.length ?? 0
-  return count > 1 ? `${workspaceFolder.name}: ` : ''
-}
+
 
 /**
  * Update status bar item from current AgentTracker.md state.
@@ -3865,18 +4577,12 @@ function updateStatusBar(statusItem) {
   }
 
   try {
-    const trackerContent = fs.readFileSync(trackerPath, 'utf8')
-    const tracker = parseTracker(trackerContent)
-    let state = null
-    const statePath = getStatePath(workspaceFolder)
-    if (fs.existsSync(statePath)) {
-      try {
-        state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-      } catch {}
-    }
-    const config = readAgentSyncConfig(workspaceFolder)
-    const handoffInfo = readHandoffs(workspaceFolder)
-    const inProgressLines = getInProgressLines(trackerContent)
+    const snapshot = getWorkspaceSnapshot(workspaceFolder)
+    const tracker = snapshot.tracker
+    const state = snapshot.state
+    const config = snapshot.config
+    const handoffInfo = snapshot.handoffInfo
+    const inProgressLines = snapshot.inProgressLines
     const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0
     const opsState = getOperationalState(
       state,
@@ -4021,6 +4727,13 @@ async function initWorkspace(context, selectedFolder = null) {
     'Open Interactive Tutorial'
   )
 
+  // prompt for user role if not already set
+  const cfg = readAgentSyncConfig(workspaceFolder)
+  if (!cfg.userProfile || !cfg.userProfile.role) {
+    const role = await promptForRole()
+    if (role) applyRolePreset(workspaceFolder, role)
+  }
+
   if (choice === 'Open AgentSync Panel') {
     const opened = await openAgentSyncPanel()
     if (!opened) {
@@ -4075,6 +4788,197 @@ async function openHandoffs() {
   const handoffsPath = getHandoffsPath(workspaceFolder)
   const doc = await vscode.workspace.openTextDocument(handoffsPath)
   await vscode.window.showTextDocument(doc)
+}
+
+/**
+ * Show a compact handoff summary and open the handoff store file.
+ * @returns {Promise<void>}
+ */
+async function listHandoffsCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+  ensureHandoffsFile(workspaceFolder)
+  const handoffs = listHandoffRecords(workspaceFolder)
+  const openCount = handoffs.filter((h) => isOpenHandoff(h)).length
+  const detail = [
+    `Total handoffs: ${handoffs.length}`,
+    `Open handoffs: ${openCount}`,
+    `Queued: ${handoffs.filter((h) => String(h?.status || '').toLowerCase() === 'queued').length}`,
+    `In progress: ${handoffs.filter((h) => String(h?.status || '').toLowerCase() === 'in_progress').length}`
+  ].join('\n')
+  vscode.window.showInformationMessage('AgentSync Handoffs', { modal: true, detail })
+  const handoffsPath = getHandoffsPath(workspaceFolder)
+  const doc = await vscode.workspace.openTextDocument(handoffsPath)
+  await vscode.window.showTextDocument(doc)
+}
+
+/**
+ * Claim a queued handoff from the command palette.
+ * @returns {Promise<void>}
+ */
+async function claimHandoffCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+  const state = readStateFile(workspaceFolder) || {}
+  const defaultAgent =
+    toSingleLine(state?.activeSession?.agent) || toSingleLine(state?.lastSession?.agent) || 'Codex'
+  const agent = await promptForAgent(defaultAgent)
+  if (!agent) return
+
+  const queued = listHandoffRecords(workspaceFolder).filter(
+    (h) => String(h?.status || '').toLowerCase() === 'queued'
+  )
+  if (queued.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No queued handoffs to claim.')
+    return
+  }
+
+  const picks = queued.map((h) => ({
+    label: toSingleLine(h?.handoff_id) || 'unknown',
+    description: toSingleLine(h?.summary) || 'No summary',
+    detail: `from ${toSingleLine(h?.from_agent) || 'unknown'} -> ${(h?.to_agents || []).join(', ') || 'any'}`
+  }))
+  const selected = await vscode.window.showQuickPick(picks, {
+    placeHolder: 'Select a queued handoff to claim',
+    ignoreFocusOut: true
+  })
+  if (!selected) return
+
+  const result = claimHandoffRecord(workspaceFolder, selected.label, agent)
+  if (!result.ok) {
+    vscode.window.showWarningMessage(
+      `AgentSync: Could not claim ${selected.label} (${result.reason || 'unknown reason'}).`
+    )
+    return
+  }
+  syncTrackerHandoffsSection(workspaceFolder)
+  vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${selected.label}.`)
+}
+
+/**
+ * Mark an existing handoff as complete/transitioned.
+ * @returns {Promise<void>}
+ */
+async function completeHandoffCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+  const state = readStateFile(workspaceFolder) || {}
+  const defaultAgent =
+    toSingleLine(state?.activeSession?.agent) || toSingleLine(state?.lastSession?.agent) || 'Codex'
+  const agent = await promptForAgent(defaultAgent)
+  if (!agent) return
+
+  const candidates = listHandoffRecords(workspaceFolder).filter((h) =>
+    OPEN_HANDOFF_STATUSES.has(String(h?.status || '').toLowerCase())
+  )
+  if (candidates.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No open handoffs to complete.')
+    return
+  }
+
+  const selected = await vscode.window.showQuickPick(
+    candidates.map((h) => ({
+      label: toSingleLine(h?.handoff_id) || 'unknown',
+      description: `${toSingleLine(h?.status) || 'queued'} | ${toSingleLine(h?.summary) || 'No summary'}`
+    })),
+    {
+      placeHolder: 'Select a handoff to transition',
+      ignoreFocusOut: true
+    }
+  )
+  if (!selected) return
+
+  const statusPick = await vscode.window.showQuickPick(
+    [
+      { label: 'merged', description: 'Mark as merged' },
+      { label: 'approved', description: 'Mark as approved' },
+      { label: 'ready_for_review', description: 'Mark as ready for review' },
+      { label: 'blocked', description: 'Mark as blocked' },
+      { label: 'escalated', description: 'Mark as escalated' }
+    ],
+    {
+      placeHolder: 'Select resulting status',
+      ignoreFocusOut: true
+    }
+  )
+  if (!statusPick) return
+
+  const reasonInput = await vscode.window.showInputBox({
+    prompt: 'Transition reason (optional)',
+    placeHolder: 'Example: CI green, merged via PR #123'
+  })
+  if (reasonInput === undefined) return
+
+  const result = completeHandoffRecord(
+    workspaceFolder,
+    selected.label,
+    statusPick.label,
+    agent,
+    reasonInput
+  )
+  if (!result.ok) {
+    vscode.window.showErrorMessage(
+      `AgentSync: Could not complete ${selected.label} (${result.reason || 'unknown reason'}).`
+    )
+    return
+  }
+  vscode.window.showInformationMessage(
+    `AgentSync: Handoff ${selected.label} moved to ${statusPick.label}.`
+  )
+}
+
+/**
+ * Generate a context capsule JSON for downstream agents.
+ * @returns {Promise<void>}
+ */
+async function contextCapsuleCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+  const capsule = generateContextCapsule(workspaceFolder)
+  const capsulePath = getContextCapsulePath(workspaceFolder)
+  const openChoice = await vscode.window.showInformationMessage(
+    `AgentSync: Context capsule generated (${capsule.handoffs.openCount} open handoff(s)).`,
+    'Open Capsule',
+    'Dismiss'
+  )
+  if (openChoice === 'Open Capsule') {
+    const doc = await vscode.workspace.openTextDocument(capsulePath)
+    await vscode.window.showTextDocument(doc)
+  }
+}
+
+/**
+ * Sync .agencysync runs/events into AgentSync handoffs.
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<{ synced:number, created:number, updated:number, errors:string[] } | null>}
+ */
+async function syncAgencyRunsCommand(options = {}) {
+  const workspaceFolder =
+    options.workspaceFolder || (await resolveWorkspaceFolder({ allowPick: true }))
+  if (!workspaceFolder) {
+    if (!options.silent) vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return null
+  }
+  const result = syncAgencyRunsCore(workspaceFolder)
+  if (!options.silent) {
+    const errorSuffix = result.errors.length > 0 ? ` (${result.errors.length} error(s))` : ''
+    vscode.window.showInformationMessage(
+      `AgentSync: Agency sync complete. ${result.synced} candidate(s), ${result.created} created, ${result.updated} updated${errorSuffix}.`
+    )
+  }
+  return result
 }
 
 /**
@@ -4145,6 +5049,12 @@ async function startSession(context, options = {}) {
 
   const tracker = parseTracker(content)
   const config = readAgentSyncConfig(workspaceFolder)
+  if (!config.userProfile || !config.userProfile.role) {
+    const role = await promptForRole()
+    if (role) applyRolePreset(workspaceFolder, role)
+    // reload config after applying preset
+    Object.assign(config, readAgentSyncConfig(workspaceFolder))
+  }
   const zeroTouchCfg = config.automation?.startSessionZeroTouch || DEFAULT_START_SESSION_ZERO_TOUCH
   const zeroTouchEnabled = zeroTouchCfg.enabled === true
 
@@ -4162,7 +5072,12 @@ async function startSession(context, options = {}) {
       if (candidate) {
         if (zeroTouchCfg.autoClaimHandoff) {
           // Fully auto: claim immediately without prompting
-          claimHandoffRecord(workspaceFolder, toSingleLine(candidate.handoff_id), agentPreFill)
+          const claimResult = claimHandoffRecord(
+            workspaceFolder,
+            toSingleLine(candidate.handoff_id),
+            agentPreFill
+          )
+          if (claimResult.ok) syncTrackerHandoffsSection(workspaceFolder)
           goalPreFill = goalPreFill || toSingleLine(candidate.summary)
           vscode.window.showInformationMessage(
             `AgentSync: Picked up handoff ${candidate.handoff_id}: ${toSingleLine(candidate.summary)}`
@@ -4188,10 +5103,17 @@ async function startSession(context, options = {}) {
 
   // If user confirmed with a pre-filled handoff (semi-auto), claim it now
   if (zeroTouchEnabled && !zeroTouchCfg.autoClaimHandoff && claimedHandoff) {
-    claimHandoffRecord(workspaceFolder, toSingleLine(claimedHandoff.handoff_id), agent)
-    vscode.window.showInformationMessage(
-      `AgentSync: Claimed handoff ${claimedHandoff.handoff_id}: ${toSingleLine(claimedHandoff.summary)}`
+    const claimResult = claimHandoffRecord(
+      workspaceFolder,
+      toSingleLine(claimedHandoff.handoff_id),
+      agent
     )
+    if (claimResult.ok) {
+      syncTrackerHandoffsSection(workspaceFolder)
+      vscode.window.showInformationMessage(
+        `AgentSync: Claimed handoff ${claimedHandoff.handoff_id}: ${toSingleLine(claimedHandoff.summary)}`
+      )
+    }
   }
 
   try {
@@ -4257,7 +5179,7 @@ async function endSession(context) {
     }
 
     goalHint = toSingleLine(state?.activeSession?.goal || '') || null
-    precomputedHotFiles = detectHotFiles(workspaceFolder)
+    precomputedHotFiles = getHotFilesCached(workspaceFolder, { force: true })
     const checks = await runHealthChecks(workspaceFolder)
     precomputedHealth = checks.results
     precomputedHealthOutputs = checks.outputs
@@ -4335,7 +5257,7 @@ async function endSession(context) {
     nextWork = nextWorkInput
 
     // Detect hot files early so we can offer handoff prompts
-    const hotFiles = detectHotFiles(workspaceFolder)
+    const hotFiles = getHotFilesCached(workspaceFolder, { force: true })
     if (hotFiles.length > 0) {
       const modeChoice = await vscode.window.showQuickPick(
         [
@@ -4499,6 +5421,16 @@ async function endSession(context) {
       ? 'AgentSync: Session ended. ' + failedChecks + ' health check(s) failed.' + handoffMsg
       : 'AgentSync: Session ended and tracker updated.' + handoffMsg
 
+  // show capability/model recommendation if available
+  if (result && result.complexityInfo) {
+    const info = result.complexityInfo
+    const caps = info.capabilities.length > 0 ? info.capabilities.join(', ') : 'general work'
+    const tierLabel = info.tier === 'lead' ? 'lead-tier' : 'worker-tier'
+    vscode.window.showInformationMessage(
+      `Next task needs ${caps} — suggest a ${tierLabel} model (${info.reason}).`
+    )
+  }
+
   if (zeroTouchEnabled) {
     const summarySourceMsg =
       result.summarySource === 'deterministic'
@@ -4598,7 +5530,7 @@ async function autoDetectCommands(workspaceFolder, options = {}) {
   const existing = readAgentSyncConfig(workspaceFolder)
   const updated = { ...existing, commands: { ...existing.commands, ...detected } }
   try {
-    fs.writeFileSync(getConfigPath(workspaceFolder), JSON.stringify(updated, null, 2), 'utf8')
+    writeConfigFile(workspaceFolder, updated)
     return true
   } catch {
     return false
@@ -4809,7 +5741,8 @@ function activate(context) {
       hotFileDecorationProvider.clear()
       return
     }
-    const state = readStateFile(folder)
+    const snapshot = getWorkspaceSnapshot(folder)
+    const state = snapshot.state
     const hotFiles = Array.isArray(state?.hotFiles) ? state.hotFiles : []
     if (hotFiles.length > 0) {
       const agent = state?.activeSession?.agent || state?.lastSession?.agent || 'unknown'
@@ -4826,27 +5759,88 @@ function activate(context) {
     refreshHotFileDecorations()
   }
 
+  let refreshTimer = null
+  let refreshInFlight = false
+  let refreshQueued = false
+
+  const runRefresh = () => {
+    if (refreshInFlight) {
+      refreshQueued = true
+      return
+    }
+    refreshInFlight = true
+    try {
+      refresh()
+    } finally {
+      refreshInFlight = false
+      if (refreshQueued) {
+        refreshQueued = false
+        setTimeout(runRefresh, 0)
+      }
+    }
+  }
+
+  const scheduleRefresh = (workspaceFolder = null, delayMs = 120) => {
+    if (workspaceFolder) invalidateWorkspaceCaches(workspaceFolder)
+    else invalidateWorkspaceCaches(null)
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null
+      runRefresh()
+    }, delayMs)
+  }
+
+  const metricDebounceTimers = new Map()
+  const queueSessionMetricFileChange = (workspaceFolder, changedPath) => {
+    if (!workspaceFolder || !changedPath) return
+    const rootPath = workspaceFolder.uri.fsPath
+    const relPath = normalizeRepoRelativePath(path.relative(rootPath, changedPath))
+    if (!relPath || relPath.startsWith('..') || relPath.includes('.agentsync/')) return
+
+    const timerKey = `${rootPath}::${relPath.toLowerCase()}`
+    const existingTimer = metricDebounceTimers.get(timerKey)
+    if (existingTimer) clearTimeout(existingTimer)
+
+    const timer = setTimeout(() => {
+      metricDebounceTimers.delete(timerKey)
+      const state = readStateFile(workspaceFolder)
+      if (!state?.sessionActive || !state?.sessionMetrics) return
+      state.sessionMetrics.filesModified = (state.sessionMetrics.filesModified || 0) + 1
+      writeStateFile(workspaceFolder, state)
+    }, 350)
+
+    metricDebounceTimers.set(timerKey, timer)
+  }
+
   // â”€â”€ File watchers â”€â”€
   const trackerWatcher = vscode.workspace.createFileSystemWatcher('**/AgentTracker.md')
-  trackerWatcher.onDidChange(refresh)
-  trackerWatcher.onDidCreate(refresh)
-  trackerWatcher.onDidDelete(refresh)
+  trackerWatcher.onDidChange((uri) => {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri)
+    if (workspaceFolder) queueSessionMetricFileChange(workspaceFolder, uri.fsPath)
+    scheduleRefresh(workspaceFolder)
+  })
+  trackerWatcher.onDidCreate((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
+  trackerWatcher.onDidDelete((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
 
   const configWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync.json')
-  configWatcher.onDidChange(refresh)
-  configWatcher.onDidCreate(refresh)
-  configWatcher.onDidDelete(refresh)
+  configWatcher.onDidChange((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
+  configWatcher.onDidCreate((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
+  configWatcher.onDidDelete((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
 
   const handoffsWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync/handoffs.json')
-  handoffsWatcher.onDidChange(refresh)
-  handoffsWatcher.onDidCreate(refresh)
-  handoffsWatcher.onDidDelete(refresh)
+  handoffsWatcher.onDidChange((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
+  handoffsWatcher.onDidCreate((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
+  handoffsWatcher.onDidDelete((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
 
   // state.json is written after AgentTracker.md on session changes, but the
   // drop-zone API writes it independently â€” watch it to keep the panel live.
   const stateWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync/state.json')
-  stateWatcher.onDidChange(refresh)
-  stateWatcher.onDidCreate(refresh)
+  stateWatcher.onDidChange((uri) => {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri)
+    if (workspaceFolder) queueSessionMetricFileChange(workspaceFolder, uri.fsPath)
+    scheduleRefresh(workspaceFolder)
+  })
+  stateWatcher.onDidCreate((uri) => scheduleRefresh(vscode.workspace.getWorkspaceFolder(uri)))
 
   // Drop-zone API: terminal agents write .agentsync/request.json to trigger actions
   const requestWatcher = vscode.workspace.createFileSystemWatcher('**/.agentsync/request.json')
@@ -4859,15 +5853,41 @@ function activate(context) {
     if (folder) await processDropZoneRequest(folder)
   })
 
+  const agencySyncTimers = new Map()
+  const queueAgencySync = (workspaceFolder) => {
+    if (!workspaceFolder) return
+    const key = workspaceFolder.uri.fsPath
+    const existingTimer = agencySyncTimers.get(key)
+    if (existingTimer) clearTimeout(existingTimer)
+    const timer = setTimeout(async () => {
+      agencySyncTimers.delete(key)
+      await syncAgencyRunsCommand({ workspaceFolder, silent: true })
+      scheduleRefresh(workspaceFolder)
+    }, 500)
+    agencySyncTimers.set(key, timer)
+  }
+
+  const agencyEventsWatcher = vscode.workspace.createFileSystemWatcher(
+    '**/.agencysync/events/**/*.json'
+  )
+  agencyEventsWatcher.onDidChange((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+  agencyEventsWatcher.onDidCreate((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+  agencyEventsWatcher.onDidDelete((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+
+  const agencyRunsWatcher = vscode.workspace.createFileSystemWatcher('**/.agencysync/runs.json')
+  agencyRunsWatcher.onDidChange((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+  agencyRunsWatcher.onDidCreate((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+  agencyRunsWatcher.onDidDelete((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+
   // Refresh the panel when the active editor changes (workspace folder may differ)
-  const onEditorChange = vscode.window.onDidChangeActiveTextEditor(refresh)
-  const onWorkspaceChange = vscode.workspace.onDidChangeWorkspaceFolders(refresh)
+  const onEditorChange = vscode.window.onDidChangeActiveTextEditor(() => scheduleRefresh())
+  const onWorkspaceChange = vscode.workspace.onDidChangeWorkspaceFolders(() => scheduleRefresh())
 
   // Warn when a hot file is opened during an active session
   const onOpenDoc = vscode.workspace.onDidOpenTextDocument((doc) => {
     const folder = vscode.workspace.getWorkspaceFolder(doc.uri)
     if (!folder) return
-    const state = readStateFile(folder)
+    const state = getWorkspaceSnapshot(folder).state
     if (!state?.sessionActive) return
     const hotFiles = Array.isArray(state?.hotFiles) ? state.hotFiles : []
     if (hotFiles.length === 0) return
@@ -4894,14 +5914,9 @@ function activate(context) {
     if (!fs.existsSync(statePath)) return
     try {
       const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-      if (state.sessionActive) refresh()
+      if (state.sessionActive) scheduleRefresh(folder, 0)
     } catch {}
   }, 60 * 1000)
-
-  // Gentle pulse so the panel can show live state feedback frames.
-  const statePulseTimer = setInterval(() => {
-    refresh()
-  }, 2000)
 
   // â”€â”€ Commands â”€â”€
   const initCmd = vscode.commands.registerCommand('agentsync.init', () => initWorkspace(context))
@@ -4935,6 +5950,21 @@ function activate(context) {
   const openHandoffsCmd = vscode.commands.registerCommand('agentsync.openHandoffs', () =>
     openHandoffs()
   )
+  const listHandoffsCmd = vscode.commands.registerCommand('agentsync.listHandoffs', () =>
+    listHandoffsCommand()
+  )
+  const claimHandoffCmd = vscode.commands.registerCommand('agentsync.claimHandoff', () =>
+    claimHandoffCommand()
+  )
+  const completeHandoffCmd = vscode.commands.registerCommand('agentsync.completeHandoff', () =>
+    completeHandoffCommand()
+  )
+  const contextCapsuleCmd = vscode.commands.registerCommand('agentsync.contextCapsule', () =>
+    contextCapsuleCommand()
+  )
+  const syncAgencyRunsCmd = vscode.commands.registerCommand('agentsync.syncAgencyRuns', () =>
+    syncAgencyRunsCommand()
+  )
   const clearActiveSessionCmd = vscode.commands.registerCommand(
     'agentsync.clearActiveSession',
     () => clearActiveSession()
@@ -4956,8 +5986,82 @@ function activate(context) {
       )
     }
   })
+  const contextStatusCmd = vscode.commands.registerCommand('agentsync.contextStatus', async () => {
+    const workspaceFolder = await resolveWorkspaceFolder()
+    if (!workspaceFolder) {
+      vscode.window.showWarningMessage('AgentSync: No workspace folder is open.')
+      return
+    }
+
+    const snapshot = getWorkspaceSnapshot(workspaceFolder)
+    const state = snapshot.state
+    const handoffInfo = snapshot.handoffInfo
+    const hotFiles = getHotFilesCached(workspaceFolder, { force: true })
+    const inProgressLines = snapshot.inProgressLines || []
+
+    const openHandoffs = handoffInfo.handoffs.filter((h) =>
+      OPEN_HANDOFF_STATUSES.has(String(h?.status || '').toLowerCase())
+    ).length
+
+    // Estimate complexity from diff size
+    const diffOutput = runGit(workspaceFolder, ['diff', '--shortstat']) || ''
+    const diffMatch = diffOutput.match(
+      /(\d+) files? changed(?:, (\d+) insertions?)?(?:, (\d+) deletions?)?/
+    )
+    const filesChanged = diffMatch ? parseInt(diffMatch[1], 10) : 0
+    const insertions = diffMatch && diffMatch[2] ? parseInt(diffMatch[2], 10) : 0
+    const deletions = diffMatch && diffMatch[3] ? parseInt(diffMatch[3], 10) : 0
+    const totalChanges = insertions + deletions
+
+    let complexity = 'Low'
+    if (totalChanges > 500 || filesChanged > 10) complexity = 'High'
+    else if (totalChanges > 100 || filesChanged > 5) complexity = 'Medium'
+
+    // Session duration
+    let sessionDuration = 'No active session'
+    if (state?.sessionActive && state?.activeSession?.startedAt) {
+      const started = parseISODate(state.activeSession.startedAt)
+      if (Number.isFinite(started)) {
+        sessionDuration = formatElapsed(Date.now() - started)
+      }
+    }
+
+    const lines = [
+      `Session: ${state?.sessionActive ? 'Active (' + sessionDuration + ')' : 'Inactive'}`,
+      `Hot files: ${hotFiles.length}`,
+      `In-progress items: ${inProgressLines.length}`,
+      `Open handoffs: ${openHandoffs}`,
+      `Diff: ${filesChanged} file(s), +${insertions} -${deletions}`,
+      `Estimated complexity: ${complexity}`
+    ]
+
+    if (state?.sessionMetrics) {
+      lines.push(`Files modified this session: ${state.sessionMetrics.filesModified || 0}`)
+      lines.push(`Commands run: ${state.sessionMetrics.commandsRun || 0}`)
+    }
+
+    if (complexity === 'High') {
+      lines.push('', 'Consider ending this session and handing off to reduce context size.')
+    }
+
+    vscode.window.showInformationMessage('AgentSync Context Status', {
+      modal: true,
+      detail: lines.join('\n')
+    })
+  })
+  const setRoleCmd = vscode.commands.registerCommand('agentsync.setRole', async () => {
+    const folder = await resolveWorkspaceFolder({ allowPick: true })
+    if (!folder) return
+    const existing = readAgentSyncConfig(folder)?.userProfile?.role || undefined
+    const role = await promptForRole(existing)
+    if (role) {
+      applyRolePreset(folder, role)
+      vscode.window.showInformationMessage(`AgentSync: role set to ${role.replace(/_/g, ' ')}`)
+    }
+  })
+
   const refreshCmd = vscode.commands.registerCommand('agentsync.refreshPanel', () => {
-    refresh()
+    scheduleRefresh()
   })
 
   // â”€â”€ Startup automation â”€â”€
@@ -4974,21 +6078,50 @@ function activate(context) {
     handoffsWatcher,
     stateWatcher,
     requestWatcher,
+    agencyEventsWatcher,
+    agencyRunsWatcher,
     onEditorChange,
     onWorkspaceChange,
     onOpenDoc,
+    {
+      dispose: () => {
+        for (const timer of metricDebounceTimers.values()) {
+          clearTimeout(timer)
+        }
+        metricDebounceTimers.clear()
+      }
+    },
+    {
+      dispose: () => {
+        if (refreshTimer) clearTimeout(refreshTimer)
+      }
+    },
+    {
+      dispose: () => {
+        for (const timer of agencySyncTimers.values()) {
+          clearTimeout(timer)
+        }
+        agencySyncTimers.clear()
+      }
+    },
     { dispose: () => clearInterval(elapsedTimer) },
-    { dispose: () => clearInterval(statePulseTimer) },
     initCmd,
     openCmd,
     openDashboardCmd,
     openPanelCmd,
     openTutorialCmd,
     openHandoffsCmd,
+    listHandoffsCmd,
+    claimHandoffCmd,
+    completeHandoffCmd,
+    contextCapsuleCmd,
+    syncAgencyRunsCmd,
     clearActiveSessionCmd,
     startCmd,
     endCmd,
     detectCmd,
+    contextStatusCmd,
+    setRoleCmd,
     refreshCmd
   )
 }
@@ -5011,6 +6144,15 @@ if (process.env.NODE_ENV === 'test') {
     parseCommandArgv,
     validateHandoff,
     getOperationalState,
-    formatElapsed
+    formatElapsed,
+    scoreNextTaskCapabilities,
+    normalizeHandoffStatus,
+    createHandoffRecord,
+    claimHandoffRecord,
+    completeHandoffRecord,
+    listHandoffRecords,
+    syncAgencyRunsCore,
+    generateContextCapsule,
+    processDropZoneRequest
   }
 }
