@@ -8,12 +8,12 @@
 - **Agent:** Claude
 - **Date:** 2026-03-02T18:23:24.125Z
 - **Summary:** -
-- **Branch:** master
+- **Branch:** main
 - **Commit:** 0d68240
 
 - **Date:** 2026-02-22T00:00:00Z
 - **Summary:** Implemented AgentSync Live webview dashboard, handoff-aware details panel, stale-session controls, and local VSIX refresh workflow.
-- **Branch:** master
+- **Branch:** main
 - **Commit:** (see latest commit after EOD push)
 
 ## Current Health
