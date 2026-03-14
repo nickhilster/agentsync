@@ -9,6 +9,7 @@ module.exports = {
     showWarningMessage: jest.fn(),
     showQuickPick: jest.fn(),
     showInputBox: jest.fn(),
+    showTextDocument: jest.fn().mockResolvedValue(undefined),
     createStatusBarItem: jest.fn().mockReturnValue({
       text: '',
       tooltip: '',

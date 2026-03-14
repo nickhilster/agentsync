@@ -3875,6 +3875,33 @@ function activate(context) {
   const syncAgencyRunsCmd = vscode.commands.registerCommand('agentsync.syncAgencyRuns', () =>
     syncAgencyRunsCommand()
   )
+  const syncAgentsCmd = vscode.commands.registerCommand('agentsync.syncAgents', async () => {
+    const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+      return
+    }
+    const root = workspaceFolder.uri.fsPath
+    const agentsDir = path.join(root, '.agents')
+    if (!fs.existsSync(agentsDir)) {
+      vscode.window.showInformationMessage('AgentSync: No .agents directory found to sync.')
+      return
+    }
+    const files = fs.readdirSync(agentsDir)
+    const mappings = files.map((f) => {
+      const lower = f.toLowerCase()
+      if (lower === 'copilot-instructions.md')
+        return { source: path.join('.agents', f), dest: path.join('.github', f) }
+      return { source: path.join('.agents', f), dest: f }
+    })
+    const results = require('./sync/linker').syncAgentFiles(root, mappings, {
+      allowWindowsBypass: true
+    })
+    const errors = results.filter((r) => r.action === 'error')
+    if (errors.length === 0) vscode.window.showInformationMessage('AgentSync: Sync complete.')
+    else
+      vscode.window.showWarningMessage(`AgentSync: Sync completed with ${errors.length} error(s).`)
+  })
   const clearActiveSessionCmd = vscode.commands.registerCommand(
     'agentsync.clearActiveSession',
     () => clearActiveSession()
@@ -4081,6 +4108,7 @@ module.exports = { activate, deactivate }
 // Jest sets NODE_ENV=test automatically; VS Code does not.
 if (process.env.NODE_ENV === 'test') {
   module.exports._testExports = {
+    initWorkspace,
     isEmptyValue,
     parseTracker,
     escapeRegExp,
