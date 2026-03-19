@@ -2,7 +2,7 @@
 
 Date: 2026-02-21
 Owner: AgentSync maintainers
-Status: Planning
+Status: Implemented in core (updated 2026-03-06); roadmap items retained for historical context
 
 ## Sources Reviewed
 

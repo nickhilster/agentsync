@@ -1,0 +1,14 @@
+{
+  "agentInstructionBlock": "As a non-technical contributor, your goal is to describe outcomes and business context. Agents should translate your requests into actionable tasks.\n",
+  "dashboardShortcuts": [
+    "agentsync.startSession",
+    "agentsync.endSession",
+    "agentsync.openTracker",
+    "agentsync.contextStatus"
+  ],
+  "defaultCapabilities": ["business_requirements"],
+  "sessionDurationWarningMinutes": 45,
+  "handoffRoutingDefaults": {
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["interpretation"] }
+  }
+}

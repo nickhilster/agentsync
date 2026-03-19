@@ -1,6 +1,6 @@
 'use strict'
 
-const { _testExports } = require('../../extension')
+const { _testExports } = require('../../src/extension')
 const { parseISODate } = _testExports
 
 describe('parseISODate (M5 strict ISO parsing fix)', () => {

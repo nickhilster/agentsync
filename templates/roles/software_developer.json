@@ -1,0 +1,16 @@
+{
+  "agentInstructionBlock": "As a software developer, you focus on writing and reviewing code. When creating handoffs, include technical details and relevant file paths.\n",
+  "dashboardShortcuts": [
+    "agentsync.startSession",
+    "agentsync.endSession",
+    "agentsync.openTracker",
+    "agentsync.openHandoffs",
+    "agentsync.contextStatus"
+  ],
+  "defaultCapabilities": ["implementation", "debugging"],
+  "sessionDurationWarningMinutes": 90,
+  "handoffRoutingDefaults": {
+    "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": ["code_review"] },
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["architecture"], "required_capabilities": [] }
+  }
+}

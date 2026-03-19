@@ -1,6 +1,8 @@
 .gitignore
 .agentsync/
 .agentsync/**
+.agencysync/
+.agencysync/**
 .agentsync.json
 .vscode/**
 *.vsix
@@ -13,6 +15,8 @@ CLAUDE.md
 agent-coordination-questions.md
 claude-answers.md
 codex_agent_questionnaire_answers.md
+CODEX_PLAN.md
+IMPLEMENTATION_PLAN.md
 Audit Report.md
 .git/**
 .claude/**
@@ -29,3 +33,10 @@ scripts/
 docs/
 schemas/
 .github/
+analyze.js
+esbuild.js
+jest-errors.txt
+jest-results.json
+test-output.txt
+tsconfig.json
+src/

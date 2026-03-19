@@ -1,0 +1,15 @@
+{
+  "agentInstructionBlock": "As a UX designer, you prioritize user flows, interface layouts, and accessibility. Provide context about user journeys when handing off tasks.\n",
+  "dashboardShortcuts": [
+    "agentsync.startSession",
+    "agentsync.endSession",
+    "agentsync.openTracker",
+    "agentsync.contextStatus"
+  ],
+  "defaultCapabilities": ["ui_design", "accessibility_review"],
+  "sessionDurationWarningMinutes": 60,
+  "handoffRoutingDefaults": {
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["ui_notes"] },
+    "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": ["code_review"] }
+  }
+}
