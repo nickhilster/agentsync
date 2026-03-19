@@ -4086,6 +4086,7 @@ function activate(context) {
     completeHandoffCmd,
     contextCapsuleCmd,
     syncAgencyRunsCmd,
+    syncAgentsCmd,
     clearActiveSessionCmd,
     startCmd,
     endCmd,
