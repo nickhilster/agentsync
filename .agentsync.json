@@ -1,6 +1,11 @@
 {
   "staleAfterHours": 24,
   "autoStaleSessionMinutes": 0,
+  "commands": {
+    "build": "npm run compile",
+    "test": "npm run test",
+    "deploy": ""
+  },
   "requireHandoffOnEndSession": false,
   "automation": {
     "endSessionZeroTouch": {
@@ -15,14 +20,37 @@
       "promptPreFill": true
     },
     "handoffRoutingDefaults": {
-      "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] },
-      "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": [] },
-      "copilot": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": [] }
+      "claude": {
+        "owner_mode": "single",
+        "to_agents": [
+          "codex"
+        ],
+        "required_capabilities": []
+      },
+      "codex": {
+        "owner_mode": "single",
+        "to_agents": [
+          "claude"
+        ],
+        "required_capabilities": []
+      },
+      "copilot": {
+        "owner_mode": "single",
+        "to_agents": [
+          "codex"
+        ],
+        "required_capabilities": []
+      }
     }
   },
-  "commands": {
-    "build": "",
-    "test": "npm test",
-    "deploy": ""
-  }
+  "modelTiers": null,
+  "tokenBudget": {
+    "maxTokensDefault": 4000,
+    "batchSimilarTasks": true,
+    "enableCaching": true,
+    "sessionDurationWarningMinutes": 0
+  },
+  "userProfile": null,
+  "dashboardShortcuts": null,
+  "sessionDurationWarningMinutes": 0
 }

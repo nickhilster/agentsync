@@ -3,6 +3,14 @@ node_modules
 .vscode/
 agent-matrix-theme/
 .claude/
+.agentsync/
+.agencysync/
+jest-errors.txt
+jest-results.json
+test-output.txt
+CODEX_PLAN.md
+IMPLEMENTATION_PLAN.md
+analyze.js
 agentsync/
 .husky/_/
 coverage/

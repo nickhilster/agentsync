@@ -51,3 +51,7 @@ AgentSync reads optional commands from `.agentsync.json` in the repository root:
 - `commands.deploy`
 
 When configured, `AgentSync: End Session` runs these checks and writes pass/fail to **Current Health**.
+
+## Agent Catalog
+
+AgentSync includes a catalog of 55+ agent personalities. Use `AgentSync: Browse Agent Catalog` to explore them, `AgentSync: Run with Agent` to assemble a clipboard-ready prompt, or `AgentSync: Create Pipeline` for multi-agent chains. Custom agents go in `.agentsync/agents/<category>/`.

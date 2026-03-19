@@ -1,299 +1,98 @@
 const vscode = require('vscode')
 const fs = require('fs')
 const path = require('path')
-const cp = require('child_process')
+const linker = require('./sync/linker')
 
-// ——— Modular utility imports ———————————————————————————————————————————
+// ——— Modular imports —————————————————————————————————————————————————————
+const utils = require('./utils')
+const SessionManager = require('./session/SessionManager')
+const { AgentSyncDashboardViewProvider } = require('./dashboard/DashboardProvider')
+
 const {
   // constants
-  PLACEHOLDER, DEFAULT_STALE_HOURS, OPEN_HANDOFF_STATUSES,
-  DEFAULT_END_SESSION_ZERO_TOUCH, DEFAULT_START_SESSION_ZERO_TOUCH,
-  DEFAULT_HANDOFF_ROUTING_DEFAULTS, ROLE_LIST,
+  PLACEHOLDER,
+  DEFAULT_STALE_HOURS,
+  OPEN_HANDOFF_STATUSES,
+  DEFAULT_END_SESSION_ZERO_TOUCH,
+  DEFAULT_START_SESSION_ZERO_TOUCH,
+  ROLE_LIST,
+  EXECUTION_PROVIDER_DEFS,
+  EXECUTION_PROVIDER_BY_ID,
   // paths
-  getTemplatesDir, getTrackerPath, getConfigPath, getAgentSyncDir,
-  getStatePath, getRequestPath, getResultPath, getHandoffsPath, getContextCapsulePath,
+  getTemplatesDir,
+  getTrackerPath,
+  getConfigPath,
+  getAgentSyncDir,
+  getStatePath,
+  getRequestPath,
+  getResultPath,
+  getHandoffsPath,
+  getContextCapsulePath,
   // text
-  isEmptyValue, escapeRegExp, parseTracker, getSectionBody, setSectionBody,
-  canonicalAgentId, toSingleLine, truncateSingleLine, formatElapsed,
+  isEmptyValue,
+  escapeRegExp,
+  parseTracker,
+  getSectionBody,
+  setSectionBody,
+  canonicalAgentId,
+  toSingleLine,
+  formatElapsed,
   // io
-  atomicWriteFileSync, parseISODate, parseCommandArgv, createNonce,
+  parseISODate,
+  parseCommandArgv,
   // git
-  runGit, runGitExitCode, detectHotFiles, normalizeRepoRelativePath,
-  scoreNextTaskCapabilities, detectSignatureChanges,
+  runGit,
+  runGitExitCode,
+  normalizeRepoRelativePath,
+  scoreNextTaskCapabilities,
+  getHotFilesCached,
   // workspace
-  getActiveWorkspaceFolder, resolveWorkspaceFolder, getWorkspaceLabelPrefix,
+  getActiveWorkspaceFolder,
+  resolveWorkspaceFolder,
+  getWorkspaceLabelPrefix,
+  readAgentSyncConfig,
+  writeConfigFile,
   // snapshot
-  WorkspaceSnapshotService
-} = require('./utils')
+  getWorkspaceSnapshot,
+  invalidateWorkspaceCaches,
+  // agent catalog
+  buildCatalog,
+  mapAgentToCapabilities,
+  matchAgentsByCapabilities,
+  // execution channels
+  assembleAgentPrompt,
+  deliverPrompt,
+  injectPersonalityToWorkspace,
+  // session
+  buildSessionIdentity,
+  // automation
+  buildDeterministicSessionSummary,
+  resolveAutomationRoute,
+  buildAutomationHandoffNotes,
+  // health
+  runHealthChecks,
+  resolveHealthCheckProgram,
+  // handoffs
+  validateHandoff,
+  claimHandoffRecord,
+  completeHandoffRecord,
+  syncTrackerHandoffsSection,
+  generateContextCapsule,
+  readTracker,
+  readStateFile,
+  writeStateFile,
+  readHandoffs,
+  writeHandoffs,
+  normalizeHandoffStatus,
+  buildHandoffId,
+  getHandoffOwners,
+  listHandoffRecords,
+  createHandoffRecord,
+  listRunnableQueuedHandoffs
+} = utils
 
-const HOT_FILES_CACHE_TTL_MS = 4000
-const _hotFilesCache = new Map()
-let _snapshotService = null
-// ━━━ Config reader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/**
- * Read optional AgentSync configuration.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- */
-function readAgentSyncConfig(workspaceFolder) {
-  const settings = vscode.workspace.getConfiguration('agentsync', workspaceFolder?.uri)
-  const settingsAutoStale = Number(settings.get('autoStaleSessionMinutes', 0))
-  const toNumber = (value, fallback) => {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : fallback
-  }
-  const normalizeStartSessionAutomation = (value = {}) => ({
-    enabled: value.enabled === true,
-    autoClaimHandoff: value.autoClaimHandoff === true,
-    promptPreFill: value.promptPreFill === undefined ? true : value.promptPreFill === true
-  })
-  const normalizeEndSessionAutomation = (value = {}) => {
-    const maxSummaryLength = Math.max(
-      60,
-      Math.min(
-        260,
-        Math.round(
-          toNumber(value.maxSummaryLength, DEFAULT_END_SESSION_ZERO_TOUCH.maxSummaryLength)
-        )
-      )
-    )
-    return {
-      enabled: value.enabled === true,
-      autonomy:
-        String(value.autonomy || DEFAULT_END_SESSION_ZERO_TOUCH.autonomy).trim() ||
-        DEFAULT_END_SESSION_ZERO_TOUCH.autonomy,
-      copyPromptToClipboard:
-        value.copyPromptToClipboard === undefined
-          ? DEFAULT_END_SESSION_ZERO_TOUCH.copyPromptToClipboard
-          : value.copyPromptToClipboard === true,
-      maxSummaryLength
-    }
-  }
-  const normalizeRoute = (route = {}) => {
-    const ownerMode = String(route.owner_mode || '').toLowerCase()
-    const toAgents = Array.isArray(route.to_agents)
-      ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
-      : []
-    const requiredCapabilities = Array.isArray(route.required_capabilities)
-      ? route.required_capabilities.map((c) => String(c || '').trim()).filter(Boolean)
-      : []
-    if (ownerMode === 'single' && toAgents.length === 1) {
-      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
-    }
-    if (ownerMode === 'shared' && toAgents.length === 2) {
-      return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
-    }
-    if (ownerMode === 'auto' && requiredCapabilities.length > 0) {
-      return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities }
-    }
-    return null
-  }
-  const defaultRoutes = Object.fromEntries(
-    Object.entries(DEFAULT_HANDOFF_ROUTING_DEFAULTS).map(([agentId, route]) => [
-      agentId,
-      { ...route }
-    ])
-  )
-  const normalizeAutomation = (automation = {}) => {
-    const endSessionZeroTouch = normalizeEndSessionAutomation(automation.endSessionZeroTouch || {})
-    const startSessionZeroTouch = normalizeStartSessionAutomation(
-      automation.startSessionZeroTouch || {}
-    )
-    const configured = automation.handoffRoutingDefaults || {}
-    const handoffRoutingDefaults = { ...defaultRoutes }
-    if (configured && typeof configured === 'object') {
-      for (const [rawAgentId, route] of Object.entries(configured)) {
-        const agentId = canonicalAgentId(rawAgentId)
-        if (!agentId) continue
-        const normalizedRoute = normalizeRoute(route)
-        if (normalizedRoute) handoffRoutingDefaults[agentId] = normalizedRoute
-      }
-    }
-    return { endSessionZeroTouch, startSessionZeroTouch, handoffRoutingDefaults }
-  }
-  const DEFAULT_TOKEN_BUDGET = Object.freeze({
-    maxTokensDefault: 4000,
-    batchSimilarTasks: true,
-    enableCaching: true,
-    sessionDurationWarningMinutes: 0
-  })
-  const normalizeTokenBudget = (value = {}) => ({
-    maxTokensDefault: toNumber(value.maxTokensDefault, DEFAULT_TOKEN_BUDGET.maxTokensDefault),
-    batchSimilarTasks:
-      value.batchSimilarTasks === undefined ? true : value.batchSimilarTasks === true,
-    enableCaching: value.enableCaching === undefined ? true : value.enableCaching === true,
-    sessionDurationWarningMinutes: Math.max(
-      0,
-      Math.round(
-        toNumber(
-          value.sessionDurationWarningMinutes,
-          DEFAULT_TOKEN_BUDGET.sessionDurationWarningMinutes
-        )
-      )
-    )
-  })
-  const normalizeModelTiers = (value = {}) => {
-    const result = {}
-    for (const [tier, def] of Object.entries(value)) {
-      if (tier !== 'worker' && tier !== 'lead') continue
-      result[tier] = {
-        models: Array.isArray(def?.models)
-          ? def.models.map((m) => String(m).trim()).filter(Boolean)
-          : [],
-        useCases: Array.isArray(def?.useCases)
-          ? def.useCases.map((u) => String(u).trim()).filter(Boolean)
-          : []
-      }
-    }
-    return Object.keys(result).length > 0 ? result : null
-  }
-  const defaults = {
-    staleAfterHours: DEFAULT_STALE_HOURS,
-    autoStaleSessionMinutes:
-      Number.isFinite(settingsAutoStale) && settingsAutoStale >= 0 ? settingsAutoStale : 0,
-    commands: {},
-    requireHandoffOnEndSession: false,
-    automation: normalizeAutomation({}),
-    modelTiers: null,
-    tokenBudget: normalizeTokenBudget({}),
-    userProfile: null,
-    dashboardShortcuts: null,
-    sessionDurationWarningMinutes: 0
-  }
-  const configPath = getConfigPath(workspaceFolder)
-  if (!fs.existsSync(configPath)) return defaults
-
-  try {
-    const raw = fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, '')
-    const parsed = JSON.parse(raw)
-    const staleAfterHours = Number(parsed.staleAfterHours)
-    const autoStaleSessionMinutes = Number(parsed.autoStaleSessionMinutes)
-
-    return {
-      staleAfterHours:
-        Number.isFinite(staleAfterHours) && staleAfterHours >= 0
-          ? staleAfterHours
-          : DEFAULT_STALE_HOURS,
-      autoStaleSessionMinutes:
-        Number.isFinite(autoStaleSessionMinutes) && autoStaleSessionMinutes >= 0
-          ? autoStaleSessionMinutes
-          : 0,
-      commands: parsed.commands && typeof parsed.commands === 'object' ? parsed.commands : {},
-      requireHandoffOnEndSession: parsed.requireHandoffOnEndSession === true,
-      automation: normalizeAutomation(parsed.automation || {}),
-      modelTiers: normalizeModelTiers(parsed.modelTiers || {}),
-      tokenBudget: normalizeTokenBudget(parsed.tokenBudget || {}),
-      userProfile:
-        parsed.userProfile && typeof parsed.userProfile === 'object' ? parsed.userProfile : null,
-      dashboardShortcuts: Array.isArray(parsed.dashboardShortcuts)
-        ? parsed.dashboardShortcuts
-        : null,
-      sessionDurationWarningMinutes: toNumber(parsed.sessionDurationWarningMinutes, 0)
-    }
-  } catch {
-    return defaults
-  }
-}
-
-/**
- * Write the agentsync config file with pretty JSON.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {any} data
- */
-function writeConfigFile(workspaceFolder, data) {
-  const configPath = getConfigPath(workspaceFolder)
-  try {
-    atomicWriteFileSync(configPath, JSON.stringify(data, null, 2))
-    invalidateWorkspaceCaches(workspaceFolder)
-  } catch {}
-}
-
-/**
- * Read .agentsync/state.json if present.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {any | null}
- */
-function readStateFile(workspaceFolder) {
-  const statePath = getStatePath(workspaceFolder)
-  if (!fs.existsSync(statePath)) return null
-  try {
-    return JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-/**
- * Lazily create and return the shared workspace snapshot service.
- * @returns {WorkspaceSnapshotService}
- */
-function getWorkspaceSnapshotService() {
-  if (_snapshotService) return _snapshotService
-
-  _snapshotService = new WorkspaceSnapshotService({
-    readTracker,
-    parseTracker,
-    readStateFile,
-    readConfig: readAgentSyncConfig,
-    readHandoffs,
-    getInProgressLines,
-    placeholder: PLACEHOLDER
-  })
-  return _snapshotService
-}
-
-/**
- * Read a cached workspace snapshot.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {{ force?: boolean }} [options]
- */
-function getWorkspaceSnapshot(workspaceFolder, options = {}) {
-  return getWorkspaceSnapshotService().getSnapshot(workspaceFolder, options)
-}
-
-/**
- * Invalidate per-workspace caches.
- * @param {vscode.WorkspaceFolder | null | undefined} workspaceFolder
- */
-function invalidateWorkspaceCaches(workspaceFolder) {
-  if (!workspaceFolder) {
-    _hotFilesCache.clear()
-    getWorkspaceSnapshotService().invalidateAll()
-    return
-  }
-  _hotFilesCache.delete(workspaceFolder.uri.fsPath)
-  getWorkspaceSnapshotService().invalidate(workspaceFolder)
-}
-
-/**
- * Cache hot-file detection to avoid repeated git churn during UI refresh bursts.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {{ force?: boolean }} [options]
- * @returns {string[]}
- */
-function getHotFilesCached(workspaceFolder, options = {}) {
-  const { force = false } = options
-  const key = workspaceFolder.uri.fsPath
-  const cached = _hotFilesCache.get(key)
-  const now = Date.now()
-  if (
-    !force &&
-    cached &&
-    now - cached.fetchedAt <= HOT_FILES_CACHE_TTL_MS &&
-    Array.isArray(cached.files)
-  ) {
-    return cached.files
-  }
-  const files = detectHotFiles(workspaceFolder)
-  _hotFilesCache.set(key, { files, fetchedAt: now })
-  return files
-}
-
-/**
- * Normalize agent names/ids for comparisons.
- * @param {string | undefined | null} value
- * @returns {string}
- */
+let _agentCatalog = null
+let _extensionPath = null
 
 /**
  * Prompt the user to select their workspace role.
@@ -370,46 +169,6 @@ function applyRolePreset(workspaceFolder, role) {
   }
 }
 
-
-/**
- * Parse normalized In Progress lines from tracker content.
- * @param {string | null} trackerContent
- * @returns {string[]}
- */
-function getInProgressLines(trackerContent) {
-  if (!trackerContent) return []
-  const body = getSectionBody(trackerContent, 'In Progress')
-  return body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && line !== '*Nothing active*' && !line.startsWith('<!--'))
-}
-
-/**
- * Read .agentsync/handoffs.json when present.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {{ exists: boolean, handoffs: any[], error: string | null }}
- */
-function readHandoffs(workspaceFolder) {
-  const handoffsPath = getHandoffsPath(workspaceFolder)
-  if (!fs.existsSync(handoffsPath)) {
-    return { exists: false, handoffs: [], error: null }
-  }
-
-  try {
-    const raw = fs.readFileSync(handoffsPath, 'utf8').replace(/^\uFEFF/, '')
-    const parsed = JSON.parse(raw)
-    const handoffs = Array.isArray(parsed?.handoffs) ? parsed.handoffs : []
-    return { exists: true, handoffs, error: null }
-  } catch (err) {
-    return {
-      exists: true,
-      handoffs: [],
-      error: err && err.message ? err.message : 'Invalid JSON'
-    }
-  }
-}
-
 /**
  * Ensure .agentsync/handoffs.json exists.
  * @param {vscode.WorkspaceFolder} workspaceFolder
@@ -426,79 +185,6 @@ function ensureHandoffsFile(workspaceFolder) {
     // M4: only silently ignore ENOENT; log unexpected errors
     if (err && err.code !== 'ENOENT') console.error('[AgentSync] ensureHandoffsFile error:', err)
   }
-}
-
-/**
- * Write the handoffs store to .agentsync/handoffs.json.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {{ version: number, handoffs: any[] }} data
- */
-function writeHandoffs(workspaceFolder, data) {
-  fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
-  const handoffsPath = getHandoffsPath(workspaceFolder)
-  // C3: atomic write prevents partial-write corruption
-  atomicWriteFileSync(handoffsPath, JSON.stringify(data, null, 2))
-  invalidateWorkspaceCaches(workspaceFolder)
-}
-
-/**
- * Validate a handoff record before persisting.
- * @param {any} handoff
- * @returns {{ valid: boolean, errors: string[] }}
- */
-function validateHandoff(handoff) {
-  const errors = []
-  const skipReason =
-    handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== undefined
-      ? String(handoff.no_handoff_reason || '').trim()
-      : null
-  const isSkip = Boolean(skipReason)
-
-  if (!handoff.from_agent) errors.push('from_agent is required')
-  if (!handoff.summary && !isSkip) errors.push('summary is required')
-  if (!handoff.owner_mode) errors.push('owner_mode is required')
-  if (!handoff.status) errors.push('status is required')
-
-  const mode = String(handoff.owner_mode || '').toLowerCase()
-  const toAgents = Array.isArray(handoff.to_agents) ? handoff.to_agents : []
-
-  if (mode === 'single') {
-    if (toAgents.length !== 1) errors.push('owner_mode "single" requires exactly 1 to_agents entry')
-  } else if (mode === 'shared') {
-    if (toAgents.length !== 2)
-      errors.push('owner_mode "shared" requires exactly 2 to_agents entries')
-  } else if (mode === 'auto') {
-    const caps = Array.isArray(handoff.required_capabilities) ? handoff.required_capabilities : []
-    if (caps.length === 0)
-      errors.push('owner_mode "auto" requires at least one required_capabilities entry')
-  } else if (mode !== '') {
-    errors.push(`owner_mode must be "single", "shared", or "auto" (got "${mode}")`)
-  }
-
-  if (handoff.no_handoff_reason !== null && handoff.no_handoff_reason !== undefined) {
-    if (typeof handoff.no_handoff_reason !== 'string' || !handoff.no_handoff_reason.trim()) {
-      errors.push('no_handoff_reason must be a non-empty string when provided')
-    } else {
-      if (mode !== 'auto') {
-        errors.push('skip/no_handoff records must use owner_mode "auto"')
-      }
-      if (toAgents.length > 0) {
-        errors.push('skip/no_handoff records must not set to_agents')
-      }
-    }
-  }
-
-  // M3: created_at is required for audit integrity
-  if (!handoff.created_at) {
-    errors.push('created_at is required')
-  } else if (
-    typeof handoff.created_at !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}T/.test(handoff.created_at)
-  ) {
-    errors.push('created_at must be an ISO 8601 timestamp')
-  }
-
-  return { valid: errors.length === 0, errors }
 }
 
 /**
@@ -580,53 +266,7 @@ function getStatePulseFrame(stateKey) {
   return '[idle]'
 }
 
-/**
- * Open statuses that still need action.
- * @param {any} handoff
- * @returns {boolean}
- */
-function isOpenHandoff(handoff) {
-  return OPEN_HANDOFF_STATUSES.has(String(handoff?.status || '').toLowerCase())
-}
-
-/**
- * Group handoffs into actionable buckets for UI.
- * @param {any[]} handoffs
- * @param {string} currentAgentId
- * @param {number} staleAfterHours
- */
-function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
-  const now = Date.now()
-  const staleMs = staleAfterHours * 60 * 60 * 1000
-  const isMine = (h) => {
-    const owners = Array.isArray(h?.to_agents) ? h.to_agents : []
-    return owners.map((a) => canonicalAgentId(a)).includes(currentAgentId)
-  }
-  const isStale = (h) => {
-    const stamp = h?.updated_at || h?.created_at
-    if (!stamp) return false
-    const parsed = Date.parse(stamp)
-    if (!Number.isFinite(parsed)) return false
-    return now - parsed > staleMs
-  }
-
-  const open = handoffs.filter(isOpenHandoff)
-  const assignedToMe = open.filter(
-    (h) => currentAgentId && isMine(h) && String(h?.owner_mode || '').toLowerCase() === 'single'
-  )
-  const sharedWithMe = open.filter(
-    (h) => currentAgentId && isMine(h) && String(h?.owner_mode || '').toLowerCase() === 'shared'
-  )
-  const blockedOrStale = open.filter(
-    (h) => String(h?.status || '').toLowerCase() === 'blocked' || isStale(h)
-  )
-
-  return { open, assignedToMe, sharedWithMe, blockedOrStale }
-}
-
-
-
-// â”€â”€â”€ Git helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Git helpers ——————————————————————————————————————————————————————————
 
 /**
  * Run a git command and return stdout when successful.
@@ -635,7 +275,6 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
  * @returns {string | null}
  */
 
-
 /**
  * Run a git command and return the exit code.
  * @param {vscode.WorkspaceFolder} workspaceFolder
@@ -643,8 +282,7 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
  * @returns {number}
  */
 
-
-// â”€â”€â”€ Safe file I/O helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Safe file I/O helpers ——————————————————————————————————————————————
 
 /**
  * Write a file atomically: write to a .tmp sibling then rename.
@@ -656,7 +294,6 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
  * @param {BufferEncoding} [encoding]
  */
 
-
 /**
  * Parse an ISO 8601 timestamp string into a numeric epoch ms value.
  * Returns NaN for non-ISO strings, avoiding silent misparse from Date.parse().
@@ -665,171 +302,21 @@ function getHandoffBuckets(handoffs, currentAgentId, staleAfterHours) {
  * @returns {number}
  */
 
-
 /**
  * Tokenise a command string into [program, ...args] without invoking a shell.
  * Handles quoted substrings (" and ') and backslash escapes within quotes.
- * Does NOT support shell operators (&&, ||, ;, |, $(), backticks) â€” use a
+ * Does NOT support shell operators (&&, ||, ;, |, $(), backticks) — use a
 
 
-// â”€â”€â”€ Health checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Run a health-check command safely and asynchronously.
- * C1: command is tokenised via parseCommandArgv â€” shell:true is never used,
- *     preventing injection via user-controlled .agentsync.json values.
- * M1: uses cp.spawn (async) with a 60-second timeout so the extension host
- *     is never blocked.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} command
- * @returns {Promise<{ ok: boolean, output: string }>}
- */
-function runCheckCommand(workspaceFolder, command) {
-  if (!command || !command.trim()) return Promise.resolve({ ok: false, output: '' })
-
-  const argv = parseCommandArgv(command.trim())
-  if (argv.length === 0) return Promise.resolve({ ok: false, output: '' })
-  const [program, ...args] = argv
-
-  return new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-
-    const proc = cp.spawn(program, args, { cwd: workspaceFolder.uri.fsPath })
-
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      try {
-        proc.kill('SIGTERM')
-      } catch {}
-      setTimeout(() => {
-        try {
-          proc.kill('SIGKILL')
-        } catch {}
-      }, 2000)
-      resolve({ ok: false, output: 'Health check timed out (60s limit).' })
-    }, 60 * 1000)
-
-    proc.stdout.on('data', (chunk) => {
-      stdout += chunk.toString()
-    })
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    proc.on('close', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      const output = [stdout, stderr].filter(Boolean).join('\n').trim()
-      resolve({ ok: code === 0, output })
-    })
-
-    proc.on('error', (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve({ ok: false, output: err.message })
-    })
-  })
-}
+// ——— Health checks ————————————————————————————————————————————————————————
 
 
 
-/**
- * Execute configured health checks and return per-check status and output.
- * M1: async so runCheckCommand's non-blocking spawn is properly awaited.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {Promise<{ results: Record<string, string>, outputs: Record<string, string> }>}
- */
-async function runHealthChecks(workspaceFolder) {
-  const config = readAgentSyncConfig(workspaceFolder)
-  const commandMap = {
-    Build: config.commands?.build,
-    Tests: config.commands?.test || config.commands?.tests,
-    Deploy: config.commands?.deploy
-  }
 
-  const results = {}
-  const outputs = {}
-  for (const [label, command] of Object.entries(commandMap)) {
-    if (!command || !String(command).trim()) {
-      results[label] = 'Not configured'
-      outputs[label] = ''
-      continue
-    }
 
-    const { ok, output } = await runCheckCommand(workspaceFolder, String(command))
-    results[label] = ok ? 'Pass' : 'Fail'
-    outputs[label] = output
-  }
+// ———————— UI Lifecycle ————————————————————————————————————————————————————
 
-  return { results, outputs }
-}
-
-/**
- * Format Current Health section as a markdown table.
- * Appends last 20 lines of captured output for any failed checks.
- * @param {Record<string, string>} health
- * @param {Record<string, string>} [outputs]
- * @returns {string}
- */
-function formatHealthTable(health, outputs = {}) {
-  const rows = [
-    '| Check  | Status |',
-    '| ------ | ------ |',
-    `| Build  | ${health.Build} |`,
-    `| Tests  | ${health.Tests} |`,
-    `| Deploy | ${health.Deploy} |`
-  ]
-
-  const failures = Object.entries(health).filter(([, status]) => status === 'Fail')
-  for (const [label] of failures) {
-    const output = (outputs[label] || '').trim()
-    if (output) {
-      const trimmed = output.split('\n').slice(-20).join('\n')
-      rows.push('', `**${label} output:**`, '```', trimmed, '```')
-    }
-  }
-
-  return rows.join('\n')
-}
-
-/**
- * Render the ## Agent Handoffs section body for AgentTracker.md.
- * Only open handoffs are included. Returns placeholder when none.
- * @param {any[]} handoffs
- * @returns {string}
- */
-function renderTrackerHandoffsSection(handoffs) {
-  const open = handoffs.filter(isOpenHandoff)
-  if (open.length === 0) return 'No open handoffs.'
-
-  const lines = []
-  for (const h of open) {
-    const id = String(h.handoff_id || h.task_id || 'unknown')
-    const from = String(h.from_agent || 'unknown')
-    const to =
-      Array.isArray(h.to_agents) && h.to_agents.length > 0 ? h.to_agents.join(',') : '(none)'
-    const mode = String(h.owner_mode || 'unknown')
-    const status = String(h.status || 'queued')
-    lines.push(`- [ ] ${id} | from: ${from} | to: ${to} | mode: ${mode} | status: ${status}`)
-
-    const taskParts = []
-    if (h.task_id) taskParts.push(`task: ${h.task_id}`)
-    const files = Array.isArray(h.files) ? h.files : []
-    if (files.length > 0) taskParts.push(`files: ${files.map((f) => `\`${f}\``).join(', ')}`)
-    if (taskParts.length > 0) lines.push(`  - ${taskParts.join(' | ')}`)
-
-    if (h.notes && h.notes.trim()) lines.push(`  - note: ${h.notes.trim()}`)
-  }
-
-  return lines.join('\n')
-}
-
-// â”€â”€â”€ Tracker I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Tracker I/O —————————————————————————————————————————————————————————
 
 /**
  * Open a tracker file in the editor.
@@ -911,6 +398,18 @@ async function openAgentSyncTutorial(context) {
   return false
 }
 
+async function openAgentSyncDocs(context) {
+  const manifest = context?.extension?.packageJSON || {}
+  const target = String(manifest.homepage || manifest.repository?.url || '').trim()
+  if (!target) return false
+  try {
+    await vscode.env.openExternal(vscode.Uri.parse(target))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Ensure tracker exists, optionally offering initialization.
  * @param {vscode.ExtensionContext} context
@@ -933,74 +432,9 @@ async function ensureTrackerExists(context, workspaceFolder) {
 }
 
 /**
- * Read tracker file content.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {string | null}
- */
-function readTracker(workspaceFolder) {
-  try {
-    return fs.readFileSync(getTrackerPath(workspaceFolder), 'utf8')
-  } catch {
-    return null
-  }
 }
 
-/**
- * Write tracker file content.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} content
- */
-function writeTracker(workspaceFolder, content) {
-  // C3: atomic write prevents partial-write corruption
-  atomicWriteFileSync(getTrackerPath(workspaceFolder), content)
-  invalidateWorkspaceCaches(workspaceFolder)
-}
-
-// â”€â”€â”€ State file I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Write structured session state to .agentsync/state.json.
- * Agents can read this instead of parsing AgentTracker.md.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {object} data
- */
-function writeStateFile(workspaceFolder, data) {
-  try {
-    fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
-    const existingState = readStateFile(workspaceFolder) || {}
-    const existingIntegration =
-      existingState.integration && typeof existingState.integration === 'object'
-        ? existingState.integration
-        : {}
-    const snapshotMeta = getWorkspaceSnapshotService().getMetadata(workspaceFolder)
-    const previousVersion = Math.max(
-      0,
-      Number(existingIntegration?.snapshot?.version || 0)
-    )
-    const snapshotVersion = Math.max(previousVersion + 1, Number(snapshotMeta.version || 0), 1)
-    const snapshotHash =
-      snapshotMeta.hash ||
-      getWorkspaceSnapshotService().computeHash(JSON.stringify(data || {}))
-    const integration = {
-      ...existingIntegration,
-      ...(data?.integration && typeof data.integration === 'object' ? data.integration : {}),
-      snapshot: {
-        version: snapshotVersion,
-        hash: snapshotHash || null
-      }
-    }
-    const payload = {
-      ...data,
-      integration
-    }
-    // C3: atomic write prevents partial-write corruption
-    atomicWriteFileSync(getStatePath(workspaceFolder), JSON.stringify(payload, null, 2))
-    invalidateWorkspaceCaches(workspaceFolder)
-  } catch (err) {
-    // M4: log unexpected errors rather than silently swallowing them
-    if (err && err.code !== 'ENOENT') console.error('[AgentSync] writeStateFile error:', err)
-  }
-}
+// ——— State file I/O ——————————————————————————————————————————————————————
 
 /**
  * Write a drop-zone action result to .agentsync/result.json.
@@ -1014,7 +448,7 @@ function writeResultFile(workspaceFolder, data) {
   } catch {}
 }
 
-// â”€â”€â”€ Tracker warnings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Tracker warnings ————————————————————————————————————————————————————
 
 /**
  * Return warning strings for stale tracker/branch drift.
@@ -1057,57 +491,92 @@ function getTrackerWarnings(workspaceFolder, tracker) {
   return warnings
 }
 
-// â”€â”€â”€ Prompt helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Prompt helpers ——————————————————————————————————————————————————————
+
+function getExecutionProvider(value) {
+  const normalized = canonicalAgentId(value)
+  if (!normalized) return null
+  return EXECUTION_PROVIDER_BY_ID[normalized] || null
+}
+
+function getExecutionProviderId(value) {
+  if (isEmptyValue(String(value || ''))) return null
+  return getExecutionProvider(value)?.id || canonicalAgentId(value) || null
+}
+
+function getExecutionProviderLabel(value) {
+  if (isEmptyValue(String(value || ''))) return null
+  const provider = getExecutionProvider(value)
+  if (provider) return provider.label
+  const text = String(value || '').trim()
+  return text || null
+}
+
+function getSessionProviderInfo(session, fallback = null) {
+  const providerId =
+    canonicalAgentId(session?.provider_id || '') ||
+    getExecutionProviderId(session?.provider_label || '') ||
+    getExecutionProviderId(session?.agent || '') ||
+    getExecutionProviderId(fallback)
+  const providerLabel =
+    getExecutionProviderLabel(session?.provider_label || '') ||
+    getExecutionProviderLabel(session?.agent || '') ||
+    getExecutionProviderLabel(fallback) ||
+    'Unknown'
+  return { id: providerId, label: providerLabel }
+}
+
+function getPersonalityDisplayName(workspaceFolder, personalityId) {
+  const normalized = canonicalAgentId(personalityId)
+  if (!normalized) return null
+  try {
+    const catalog = getAgentCatalog(workspaceFolder)
+    const match = catalog?.agents?.find((agent) => canonicalAgentId(agent.id) === normalized)
+    return match?.name || null
+  } catch {
+    return null
+  }
+}
+
+function getSessionPersonalityInfo(workspaceFolder, session) {
+  const personalityId =
+    canonicalAgentId(session?.personality_id || '') ||
+    canonicalAgentId(session?.agent_personality_id || '') ||
+    null
+  const personalityName =
+    String(session?.personality_name || '').trim() ||
+    getPersonalityDisplayName(workspaceFolder, personalityId) ||
+    'None'
+  return { id: personalityId, name: personalityName }
+}
 
 /**
- * Prompt user for the acting agent.
+ * Prompt user for the execution provider.
  * @param {string} defaultAgent
  * @returns {Promise<string | null>}
  */
 async function promptForAgent(defaultAgent) {
-  const preset = ['Claude', 'Codex', 'Copilot']
-  const defaultLabel = !isEmptyValue(defaultAgent) ? defaultAgent : 'Codex'
+  const defaultLabel = getExecutionProviderLabel(defaultAgent) || 'Codex'
+  const builtIn = EXECUTION_PROVIDER_DEFS.map((provider) => ({
+    label: provider.label,
+    description: provider.label === defaultLabel ? 'default' : undefined
+  }))
 
-  const choice = await vscode.window.showQuickPick(
-    [
-      ...preset.map((name) => ({
-        label: name,
-        description: name === defaultLabel ? 'default' : undefined
-      })),
-      { label: 'Other' }
-    ],
-    { placeHolder: 'Select the agent for this session' }
-  )
+  const choice = await vscode.window.showQuickPick([...builtIn, { label: 'Other' }], {
+    placeHolder: 'Select the execution provider for this session'
+  })
 
   if (!choice) return null
   if (choice.label !== 'Other') return choice.label
 
   const custom = await vscode.window.showInputBox({
-    prompt: 'Enter agent name',
+    prompt: 'Enter provider name',
     value: defaultLabel !== 'Codex' ? defaultLabel : ''
   })
   if (custom === undefined) return null
 
   const trimmed = custom.trim()
   return trimmed || null
-}
-
-
-
-/**
- * Count health check outcomes for summary text.
- * @param {Record<string, string>} health
- */
-function summarizeHealthCounts(health) {
-  const counts = { pass: 0, fail: 0, notConfigured: 0, total: 0 }
-  for (const status of Object.values(health || {})) {
-    const normalized = toSingleLine(status).toLowerCase()
-    if (normalized === 'pass') counts.pass += 1
-    else if (normalized === 'fail') counts.fail += 1
-    else counts.notConfigured += 1
-    counts.total += 1
-  }
-  return counts
 }
 
 /**
@@ -1120,138 +589,7 @@ function summarizeHealthCounts(health) {
  * }} params
  * @returns {string}
  */
-function buildDeterministicSessionSummary(params) {
-  const goal = toSingleLine(params.goal) || 'Session update'
-  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : []
-  const topFiles = hotFiles.slice(0, 2)
-  const filesText =
-    topFiles.length > 0
-      ? `${hotFiles.length} hot file${hotFiles.length === 1 ? '' : 's'} (${topFiles.join(', ')})`
-      : '0 hot files'
-  const healthCounts = summarizeHealthCounts(params.health || {})
-  const healthText = `health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}`
-  return truncateSingleLine(`${goal}; ${filesText}; ${healthText}.`, params.maxSummaryLength)
-}
-
-/**
- * Resolve deterministic routing defaults for a source agent.
- * @param {ReturnType<typeof readAgentSyncConfig>} config
- * @param {string} agent
- * @returns {{ owner_mode: 'single' | 'shared' | 'auto', to_agents: string[], required_capabilities: string[] } | null}
- */
-function resolveAutomationRoute(config, agent) {
-  const agentId = canonicalAgentId(agent)
-  if (!agentId) return null
-  const route = config?.automation?.handoffRoutingDefaults?.[agentId]
-  if (!route || typeof route !== 'object') return null
-
-  const ownerMode = String(route.owner_mode || '').toLowerCase()
-  const toAgents = Array.isArray(route.to_agents)
-    ? route.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
-    : []
-  const requiredCapabilities = Array.isArray(route.required_capabilities)
-    ? route.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
-    : []
-
-  if (ownerMode === 'single' && toAgents.length === 1) {
-    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
-  }
-  if (ownerMode === 'shared' && toAgents.length === 2) {
-    return { owner_mode: ownerMode, to_agents: toAgents, required_capabilities: [] }
-  }
-  if (ownerMode === 'auto' && requiredCapabilities.length > 0) {
-    return { owner_mode: ownerMode, to_agents: [], required_capabilities: requiredCapabilities }
-  }
-  return null
-}
-
-/**
- * Build deterministic automation notes for handoff records.
- * @param {{
- *  summary: string,
- *  hotFiles: string[],
- *  health: Record<string, string>,
- *  sourceAgent: string
- * }} params
- * @returns {string}
- */
-function buildAutomationHandoffNotes(params) {
-  const summary = toSingleLine(params.summary)
-  const sourceAgent = canonicalAgentId(params.sourceAgent) || 'unknown'
-  const hotFiles = Array.isArray(params.hotFiles) ? params.hotFiles : []
-  const topFiles = hotFiles.slice(0, 2).join(', ') || 'none'
-  const healthCounts = summarizeHealthCounts(params.health || {})
-  return toSingleLine(
-    `Auto-drafted from ${sourceAgent}. Goal: ${summary}. Start with files: ${topFiles}. Health pass:${healthCounts.pass} fail:${healthCounts.fail} n/a:${healthCounts.notConfigured}.`
-  )
-}
-
-/**
- * Build one-line handoff prompts for downstream agents.
- * @param {any} handoffRecord
- * @returns {string[]}
- */
-function buildHandoffPromptLines(handoffRecord) {
-  if (!handoffRecord || handoffRecord.no_handoff_reason) return []
-
-  const handoffId = toSingleLine(handoffRecord.handoff_id) || 'HO-UNKNOWN'
-  const branch = toSingleLine(handoffRecord.branch) || PLACEHOLDER
-  const commit = toSingleLine(handoffRecord.commit) || PLACEHOLDER
-  const files = Array.isArray(handoffRecord.files) ? handoffRecord.files.filter(Boolean) : []
-  const startFiles = files.slice(0, 2).join(', ') || 'AgentTracker.md'
-  const summary = toSingleLine(handoffRecord.summary) || 'continue the current work'
-  const mode = String(handoffRecord.owner_mode || '').toLowerCase()
-
-  // Model tier recommendation suffix
-  const modelTier = handoffRecord.recommended_model_tier || null
-  const modelJustification = toSingleLine(handoffRecord.model_justification || '')
-  let modelSuffix = ''
-  if (modelTier === 'worker') {
-    modelSuffix = ' [Worker-tier task: use a lighter model]'
-  } else if (modelTier === 'lead') {
-    modelSuffix = ' [Lead-tier task: use a capable model'
-    if (modelJustification) modelSuffix += ' \u2014 ' + modelJustification
-    modelSuffix += ']'
-  }
-
-  // Context hints suffix
-  const hints = handoffRecord.context_hints || null
-  let contextSuffix = ''
-  if (hints) {
-    const parts = []
-    if (Array.isArray(hints.entry_points) && hints.entry_points.length > 0) {
-      parts.push('entry points: ' + hints.entry_points.slice(0, 3).join(', '))
-    }
-    if (Array.isArray(hints.relevant_symbols) && hints.relevant_symbols.length > 0) {
-      parts.push('key symbols: ' + hints.relevant_symbols.slice(0, 5).join(', '))
-    }
-    if (parts.length > 0) contextSuffix = ' Context: ' + parts.join('; ') + '.'
-  }
-
-  const buildLine = (targetLabel) =>
-    `[AgentSync] Pick up ${handoffId} on ${branch} (${commit}) for ${targetLabel}: start in ${startFiles}; goal: ${summary}; check AgentTracker.md + .agentsync/handoffs.json + .agentsync/context-capsule.json.${modelSuffix}${contextSuffix}`
-
-  if (mode === 'auto') {
-    const caps = Array.isArray(handoffRecord.required_capabilities)
-      ? handoffRecord.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
-      : []
-    const capabilityLabel =
-      caps.length > 0 ? `capabilities ${caps.join(', ')}` : 'required capabilities'
-    return [buildLine(capabilityLabel)]
-  }
-
-  const targets = Array.isArray(handoffRecord.to_agents)
-    ? handoffRecord.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
-    : []
-  if (targets.length === 0) return [buildLine('next owner')]
-  return targets.map((target) => buildLine(target))
-}
-
-/**
- * Prompt once for fallback routing when automation defaults are unavailable.
- * @param {number} hotFileCount
- * @returns {Promise<{ handoffData: any, automationContext: string } | null>}
- */
+// ———————— Session Management ——————————————————————————————————————————————
 async function promptAutomationFallbackRouting(hotFileCount) {
   const modeChoice = await vscode.window.showQuickPick(
     [
@@ -1407,83 +745,11 @@ function findClaimableHandoff(workspaceFolder, agentId) {
   return (
     handoffs.find((h) => {
       if (String(h?.status || '').toLowerCase() !== 'queued') return false
-      const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : []
-      return owners.includes(canonical)
+      const owners = utils.getHandoffOwners(h)
+      return owners.length === 0 || owners.includes(canonical)
     }) || null
   )
 }
-
-/**
- * Claim a handoff record — set status to in_progress and append a state_history entry.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} handoffId
- * @param {string} agentId
- */
-function claimHandoffRecord(workspaceFolder, handoffId, agentId) {
-  const store = readHandoffs(workspaceFolder)
-  const now = new Date().toISOString()
-  const normalizedId = toSingleLine(handoffId)
-  const canonical = canonicalAgentId(agentId)
-  if (!normalizedId) return { ok: false, reason: 'missing_handoff_id' }
-  if (!canonical) return { ok: false, reason: 'missing_agent' }
-
-  let result = { ok: false, reason: 'not_found' }
-  const updated = store.handoffs.map((h) => {
-    if (toSingleLine(h?.handoff_id) !== normalizedId) return h
-
-    const currentStatus = String(h?.status || '').toLowerCase()
-    const owners = Array.isArray(h?.to_agents) ? h.to_agents.map((a) => canonicalAgentId(a)) : []
-    const lastClaim =
-      Array.isArray(h?.state_history) && h.state_history.length > 0
-        ? h.state_history[h.state_history.length - 1]
-        : null
-    const claimedBy = lastClaim?.agent ? canonicalAgentId(lastClaim.agent) : null
-
-    if (currentStatus === 'in_progress') {
-      result = { ok: false, reason: 'already_claimed', claimedBy }
-      return h
-    }
-    if (currentStatus !== 'queued') {
-      result = { ok: false, reason: 'not_claimable', status: currentStatus || 'unknown' }
-      return h
-    }
-    if (owners.length > 0 && !owners.includes(canonical)) {
-      result = { ok: false, reason: 'not_assigned' }
-      return h
-    }
-
-    result = { ok: true, handoffId: normalizedId }
-    return {
-      ...h,
-      status: 'in_progress',
-      updated_at: now,
-      state_history: [
-        ...(Array.isArray(h.state_history) ? h.state_history : []),
-        { status: 'in_progress', agent: canonical, timestamp: now, reason: 'claimed via agentsync' }
-      ]
-    }
-  })
-  if (!result.ok) return result
-  const claimedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
-  if (claimedRecord) {
-    const validation = validateHandoff(claimedRecord)
-    if (!validation.valid) {
-      return { ok: false, reason: 'invalid_handoff', errors: validation.errors }
-    }
-  }
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
-  return result
-}
-
-const HANDOFF_ALLOWED_STATUSES = new Set([
-  'queued',
-  'in_progress',
-  'blocked',
-  'ready_for_review',
-  'approved',
-  'merged',
-  'escalated'
-])
 
 /**
  * Normalize an input status to a supported handoff state.
@@ -1491,198 +757,19 @@ const HANDOFF_ALLOWED_STATUSES = new Set([
  * @param {string} fallback
  * @returns {string}
  */
-function normalizeHandoffStatus(status, fallback = 'queued') {
-  const normalized = String(status || '').toLowerCase().trim()
-  if (HANDOFF_ALLOWED_STATUSES.has(normalized)) return normalized
-  return fallback
-}
-
-/**
- * Build a unique HO-YYYYMMDD-### id.
- * @param {any[]} handoffs
- * @param {string} now
- * @returns {string}
- */
-function buildHandoffId(handoffs, now) {
-  const dateStr = now.slice(0, 10).replace(/-/g, '')
-  const existing = new Set((handoffs || []).map((h) => toSingleLine(h?.handoff_id)))
-  let seq = Math.max(1, (handoffs || []).length + 1)
-  while (seq < 10000) {
-    const id = `HO-${dateStr}-${String(seq).padStart(3, '0')}`
-    if (!existing.has(id)) return id
-    seq += 1
-  }
-  return `HO-${dateStr}-${Date.now().toString().slice(-6)}`
-}
-
-/**
- * Keep AgentTracker.md "Agent Handoffs" section in sync with the JSON source of truth.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- */
-function syncTrackerHandoffsSection(workspaceFolder) {
-  const content = readTracker(workspaceFolder)
-  if (!content) return
-  const { handoffs } = readHandoffs(workspaceFolder)
-  const updated = setSectionBody(
-    content,
-    'Agent Handoffs',
-    handoffs.length > 0 ? renderTrackerHandoffsSection(handoffs) : 'No open handoffs.'
-  )
-  writeTracker(workspaceFolder, updated)
-}
+// ———————— Handoff Records —————————————————————————————————————————————————
 
 /**
  * Create and persist a handoff record.
  * @param {vscode.WorkspaceFolder} workspaceFolder
  * @param {any} input
  */
-function createHandoffRecord(workspaceFolder, input = {}) {
-  const store = readHandoffs(workspaceFolder)
-  const now = new Date().toISOString()
-  const fromAgent = canonicalAgentId(input.from_agent || input.agent || 'agency')
-  const toAgents = Array.isArray(input.to_agents)
-    ? input.to_agents.map((a) => canonicalAgentId(a)).filter(Boolean)
-    : []
-  const requiredCaps = Array.isArray(input.required_capabilities)
-    ? input.required_capabilities.map((c) => toSingleLine(c)).filter(Boolean)
-    : []
-  const skipReason =
-    input.no_handoff_reason !== null && input.no_handoff_reason !== undefined
-      ? toSingleLine(input.no_handoff_reason)
-      : null
-  const modeInput = String(input.owner_mode || '').toLowerCase()
-  let ownerMode = modeInput
-  if (!ownerMode) {
-    ownerMode = toAgents.length >= 2 ? 'shared' : toAgents.length === 1 ? 'single' : 'auto'
-  }
-
-  const record = {
-    handoff_id: toSingleLine(input.handoff_id) || buildHandoffId(store.handoffs, now),
-    task_id: toSingleLine(input.task_id) || null,
-    from_agent: fromAgent || 'agency',
-    to_agents: toAgents,
-    owner_mode: ownerMode,
-    status: normalizeHandoffStatus(input.status, 'queued'),
-    required_capabilities: requiredCaps,
-    summary: toSingleLine(input.summary) || (skipReason ? 'Handoff skipped by agent' : 'Agency handoff'),
-    notes: toSingleLine(input.notes || ''),
-    no_handoff_reason: skipReason || null,
-    files: Array.isArray(input.files) ? input.files.map((f) => toSingleLine(f)).filter(Boolean) : [],
-    branch: toSingleLine(input.branch) || null,
-    commit: toSingleLine(input.commit) || null,
-    prior_attempts: Number.isFinite(Number(input.prior_attempts))
-      ? Math.max(0, Math.round(Number(input.prior_attempts)))
-      : 0,
-    recommended_model_tier:
-      input.recommended_model_tier === 'lead' || input.recommended_model_tier === 'worker'
-        ? input.recommended_model_tier
-        : null,
-    model_justification: toSingleLine(input.model_justification) || null,
-    context_hints:
-      input.context_hints && typeof input.context_hints === 'object' ? input.context_hints : null,
-    source_system: toSingleLine(input.source_system) || null,
-    source_run_id: toSingleLine(input.source_run_id) || null,
-    source_event_id: toSingleLine(input.source_event_id) || null,
-    created_at: now,
-    updated_at: now,
-    state_history: [
-      {
-        status: normalizeHandoffStatus(input.status, 'queued'),
-        agent: fromAgent || 'agency',
-        timestamp: now,
-        reason: skipReason ? 'created (skip)' : 'created'
-      }
-    ]
-  }
-
-  if (skipReason) {
-    record.owner_mode = 'auto'
-    record.to_agents = []
-    if (!record.required_capabilities.length) {
-      record.required_capabilities = ['skip-handoff']
-    }
-  } else if (record.owner_mode === 'single' && record.to_agents.length !== 1) {
-    record.owner_mode = 'auto'
-    record.to_agents = []
-    if (record.required_capabilities.length === 0) record.required_capabilities = ['handoff']
-  } else if (record.owner_mode === 'shared' && record.to_agents.length !== 2) {
-    record.owner_mode = 'auto'
-    record.to_agents = []
-    if (record.required_capabilities.length === 0) record.required_capabilities = ['handoff']
-  } else if (record.owner_mode === 'auto' && record.required_capabilities.length === 0) {
-    record.required_capabilities = ['handoff']
-  }
-
-  const { valid, errors } = validateHandoff(record)
-  if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
-
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: [...store.handoffs, record] })
-  syncTrackerHandoffsSection(workspaceFolder)
-  return record
-}
-
-/**
- * Transition an existing handoff to a new status.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} handoffId
- * @param {string} status
- * @param {string} agentId
- * @param {string | null} reason
- */
-function completeHandoffRecord(workspaceFolder, handoffId, status, agentId, reason = null) {
-  const normalizedId = toSingleLine(handoffId)
-  const nextStatus = normalizeHandoffStatus(status, 'merged')
-  const actor = canonicalAgentId(agentId)
-  if (!normalizedId) return { ok: false, reason: 'missing_handoff_id' }
-  if (!actor) return { ok: false, reason: 'missing_agent' }
-
-  const store = readHandoffs(workspaceFolder)
-  const now = new Date().toISOString()
-  let found = false
-  const updated = store.handoffs.map((h) => {
-    if (toSingleLine(h?.handoff_id) !== normalizedId) return h
-    found = true
-    return {
-      ...h,
-      status: nextStatus,
-      updated_at: now,
-      state_history: [
-        ...(Array.isArray(h.state_history) ? h.state_history : []),
-        {
-          status: nextStatus,
-          agent: actor,
-          timestamp: now,
-          reason: toSingleLine(reason) || 'completed via agentsync'
-        }
-      ]
-    }
-  })
-  if (!found) return { ok: false, reason: 'not_found' }
-  const completedRecord = updated.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
-  if (completedRecord) {
-    const validation = validateHandoff(completedRecord)
-    if (!validation.valid) {
-      return { ok: false, reason: 'invalid_handoff', errors: validation.errors }
-    }
-  }
-
-  writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
-  syncTrackerHandoffsSection(workspaceFolder)
-  return { ok: true, handoffId: normalizedId, status: nextStatus }
-}
-
-/**
- * Read all handoff records.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- */
-function listHandoffRecords(workspaceFolder) {
-  const store = readHandoffs(workspaceFolder)
-  return store.handoffs
-}
 
 /**
  * @param {vscode.WorkspaceFolder} workspaceFolder
  */
+// DEPRECATED: .agencysync/ sync is maintained for backward compatibility.
+// New projects should use the AgentSync agent catalog and clipboard-first execution instead.
 function getAgencySyncPaths(workspaceFolder) {
   const base = path.join(workspaceFolder.uri.fsPath, '.agencysync')
   return {
@@ -1734,17 +821,20 @@ function listJsonFilesRecursive(dirPath) {
 function normalizeAgencyCandidate(raw, meta = {}) {
   if (!raw || typeof raw !== 'object') return null
   const toAgents = Array.isArray(raw.to_agents || raw.owners || raw.assignees)
-    ? (raw.to_agents || raw.owners || raw.assignees)
+    ? raw.to_agents || raw.owners || raw.assignees
     : []
   const requiredCaps = Array.isArray(raw.required_capabilities || raw.capabilities)
-    ? (raw.required_capabilities || raw.capabilities)
+    ? raw.required_capabilities || raw.capabilities
     : []
   const sourceRunId = toSingleLine(raw.run_id || raw.runId || meta.sourceRunId || '') || null
-  const sourceEventId = toSingleLine(raw.event_id || raw.eventId || meta.sourceEventId || '') || null
+  const sourceEventId =
+    toSingleLine(raw.event_id || raw.eventId || meta.sourceEventId || '') || null
 
   const modeInput = String(raw.owner_mode || '').toLowerCase()
-  const ownerMode = modeInput || (toAgents.length >= 2 ? 'shared' : toAgents.length === 1 ? 'single' : 'auto')
-  const normalizedMode = ownerMode === 'single' || ownerMode === 'shared' || ownerMode === 'auto' ? ownerMode : 'auto'
+  const ownerMode =
+    modeInput || (toAgents.length >= 2 ? 'shared' : toAgents.length === 1 ? 'single' : 'auto')
+  const normalizedMode =
+    ownerMode === 'single' || ownerMode === 'shared' || ownerMode === 'auto' ? ownerMode : 'auto'
 
   return {
     handoff_id: toSingleLine(raw.handoff_id || raw.handoffId || ''),
@@ -1811,7 +901,11 @@ function syncAgencyRunsCore(workspaceFolder) {
       ...(state.integration && typeof state.integration === 'object' ? state.integration : {}),
       lastAgencySyncAt: new Date().toISOString()
     }
-    writeStateFile(workspaceFolder, { ...state, integration, lastUpdated: new Date().toISOString() })
+    writeStateFile(workspaceFolder, {
+      ...state,
+      integration,
+      lastUpdated: new Date().toISOString()
+    })
     return { synced: 0, created: 0, updated: 0, errors }
   }
 
@@ -1828,7 +922,9 @@ function syncAgencyRunsCore(workspaceFolder) {
       if (byId >= 0) return byId
     }
     if (candidate.source_event_id) {
-      const byEvent = next.findIndex((h) => toSingleLine(h?.source_event_id) === candidate.source_event_id)
+      const byEvent = next.findIndex(
+        (h) => toSingleLine(h?.source_event_id) === candidate.source_event_id
+      )
       if (byEvent >= 0) return byEvent
     }
     if (candidate.source_run_id && candidate.task_id) {
@@ -1850,7 +946,9 @@ function syncAgencyRunsCore(workspaceFolder) {
         const merged = {
           ...existing,
           ...candidate,
-          handoff_id: toSingleLine(existing.handoff_id || candidate.handoff_id || '') || buildHandoffId(next, now),
+          handoff_id:
+            toSingleLine(existing.handoff_id || candidate.handoff_id || '') ||
+            buildHandoffId(next, now),
           task_id: toSingleLine(existing.task_id || candidate.task_id) || null,
           from_agent: canonicalAgentId(candidate.from_agent || existing.from_agent || 'agency'),
           to_agents:
@@ -1868,7 +966,8 @@ function syncAgencyRunsCore(workspaceFolder) {
                 ? 'single'
                 : 'auto'),
           required_capabilities:
-            Array.isArray(candidate.required_capabilities) && candidate.required_capabilities.length > 0
+            Array.isArray(candidate.required_capabilities) &&
+            candidate.required_capabilities.length > 0
               ? candidate.required_capabilities
               : Array.isArray(existing.required_capabilities)
                 ? existing.required_capabilities
@@ -1890,7 +989,10 @@ function syncAgencyRunsCore(workspaceFolder) {
         if (merged.no_handoff_reason) {
           merged.owner_mode = 'auto'
           merged.to_agents = []
-          if (!Array.isArray(merged.required_capabilities) || merged.required_capabilities.length === 0) {
+          if (
+            !Array.isArray(merged.required_capabilities) ||
+            merged.required_capabilities.length === 0
+          ) {
             merged.required_capabilities = ['skip-handoff']
           }
         } else if (merged.owner_mode === 'auto' && merged.required_capabilities.length === 0) {
@@ -1901,7 +1003,7 @@ function syncAgencyRunsCore(workspaceFolder) {
         next[idx] = merged
         updatedCount += 1
       } else {
-        const createdRecord = createHandoffRecord(workspaceFolder, {
+        const createdRecord = utils.createHandoffRecord(workspaceFolder, {
           ...candidate,
           summary: candidate.summary || 'Agency handoff',
           notes: candidate.notes || '',
@@ -1936,472 +1038,23 @@ function syncAgencyRunsCore(workspaceFolder) {
 // They are called by the interactive VS Code commands and by the drop-zone API,
 // allowing terminal agents and scripts to drive sessions without the UI.
 
-/**
- * Record a session start in AgentTracker.md and write state.json.
- * Throws if the tracker cannot be read.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} agent
- * @param {string} goal
- * @returns {{ agent: string, goal: string }}
- */
-function startSessionCore(workspaceFolder, agent, goal) {
-  const content = readTracker(workspaceFolder)
-  if (!content) throw new Error('Could not read AgentTracker.md')
-
-  const existingTracker = parseTracker(content)
-  const normalizedGoal = (goal || '').trim() || 'Session started'
-  const entry = `- [ ] ${agent} (${new Date().toISOString()}): ${normalizedGoal}`
-
-  const currentBody = getSectionBody(content, 'In Progress')
-  const currentLines = currentBody
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => !line.startsWith('<!--'))
-    .filter((line) => line && line.toLowerCase() !== '*nothing active*')
-
-  const updatedBody = [...currentLines, entry].join('\n')
-  const updated = setSectionBody(content, 'In Progress', updatedBody || '*Nothing active*')
-  writeTracker(workspaceFolder, updated)
-
-  // Prefer lastSession from existing state.json so structured data survives across sessions.
-  // Fall back to parsing the tracker for workspaces that haven't written state.json yet.
-  const existingState = readStateFile(workspaceFolder) || {}
-  const lastSessionFromState = existingState.lastSession || null
-  const lastSessionFromTracker = isEmptyValue(existingTracker.agent)
-    ? null
-    : {
-        agent: existingTracker.agent,
-        date: existingTracker.date,
-        summary: existingTracker.summary,
-        branch: existingTracker.branch,
-        commit: existingTracker.commit
-      }
-  const lastSession = lastSessionFromState || lastSessionFromTracker
-
-  const updatedInProgressLines = [...currentLines, entry]
-
-  writeStateFile(workspaceFolder, {
-    sessionActive: true,
-    lastUpdated: new Date().toISOString(),
-    activeSession: {
-      agent,
-      goal: normalizedGoal,
-      startedAt: new Date().toISOString()
-    },
-    sessionMetrics: {
-      filesOpened: 0,
-      filesModified: 0,
-      commandsRun: 0,
-      startedAt: new Date().toISOString()
-    },
-    lastSession,
-    hotFiles: [],
-    inProgress: updatedInProgressLines
-  })
-
-  return { agent, goal: normalizedGoal }
-}
-
-/**
- * Record a session end in AgentTracker.md and write state.json.
- * Runs health checks and captures their output. Throws if the tracker cannot be read.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} agent
- * @param {string} summary
- * @param {string} [nextWork]
- * @param {{ summary?: string, notes?: string, owner_mode?: string, to_agents?: string[], required_capabilities?: string[], no_handoff_reason?: string, automation_context?: string | null, task_id?: string | null } | null} [handoffData]
- * @param {{ hotFiles?: string[], healthResults?: Record<string, string>, healthOutputs?: Record<string, string>, summarySource?: 'user' | 'deterministic', automationUsed?: boolean, automationContext?: string | null, goalHint?: string | null }} [options]
- * @returns {{ health: Record<string, string>, healthOutputs: Record<string, string>, hotFiles: string[], handoff: object | null, generatedSummary: string, summarySource: 'user' | 'deterministic', handoffPrompts: string[], promptCopiedToClipboard: boolean }}
- */
-async function endSessionCore(
-  workspaceFolder,
-  agent,
-  summary,
-  nextWork,
-  handoffData = null,
-  options = {}
-) {
-  let content = readTracker(workspaceFolder)
-  if (!content) throw new Error('Could not read AgentTracker.md')
-
-  const config = readAgentSyncConfig(workspaceFolder)
-  const zeroTouchCfg = config.automation?.endSessionZeroTouch || DEFAULT_END_SESSION_ZERO_TOUCH
+function updateActiveSessionContext(workspaceFolder, updates = {}) {
   const state = readStateFile(workspaceFolder) || {}
-  const now = new Date().toISOString()
-  const branch = runGit(workspaceFolder, ['rev-parse', '--abbrev-ref', 'HEAD']) || PLACEHOLDER
-  const commit = runGit(workspaceFolder, ['rev-parse', '--short', 'HEAD']) || PLACEHOLDER
-  const hotFiles = Array.isArray(options.hotFiles)
-    ? options.hotFiles
-    : getHotFilesCached(workspaceFolder, { force: true })
-  const signatureChanges = detectSignatureChanges(workspaceFolder, hotFiles)
-  const complexityInfo = scoreNextTaskCapabilities(
-    hotFiles,
-    signatureChanges,
-    state?.sessionMetrics || {},
-    state?.priorAttempts || 0
-  )
-
-  // M1: await the now-async health checks so the host is not blocked
-  let health = options.healthResults
-  let healthOutputs = options.healthOutputs
-  if (!health || !healthOutputs) {
-    const checks = await runHealthChecks(workspaceFolder)
-    health = checks.results
-    healthOutputs = checks.outputs
+  if (!state?.sessionActive || !state?.activeSession) return null
+  const nextSession = {
+    ...state.activeSession,
+    ...updates
   }
-  if (!health || typeof health !== 'object') health = {}
-  if (!healthOutputs || typeof healthOutputs !== 'object') healthOutputs = {}
-
-  const goalHint = toSingleLine(options.goalHint || state?.activeSession?.goal || '')
-  let normalizedSummary = toSingleLine(summary)
-  let summarySource = options.summarySource === 'deterministic' ? 'deterministic' : 'user'
-  let automationUsed = options.automationUsed === true
-  const automationFeatureEnabled = zeroTouchCfg.enabled || options.automationUsed === true
-
-  if (!normalizedSummary && zeroTouchCfg.enabled) {
-    normalizedSummary = buildDeterministicSessionSummary({
-      goal: goalHint,
-      hotFiles,
-      health,
-      maxSummaryLength: zeroTouchCfg.maxSummaryLength
-    })
-    summarySource = 'deterministic'
-    automationUsed = true
-  }
-
-  const persistedSummary = normalizedSummary || PLACEHOLDER
-
-  let automationContext =
-    toSingleLine(
-      options.automationContext || (handoffData && handoffData.automation_context) || ''
-    ) || null
-
-  // Auto-route handoff for headless/automated paths when hot files exist and routing defaults are known.
-  if (hotFiles.length > 0 && handoffData === null && zeroTouchCfg.enabled) {
-    const autoRoute = resolveAutomationRoute(config, agent)
-    if (autoRoute) {
-      handoffData = {
-        summary: normalizedSummary || 'Session update',
-        notes: buildAutomationHandoffNotes({
-          summary: normalizedSummary || 'Session update',
-          hotFiles,
-          health,
-          sourceAgent: agent
-        }),
-        owner_mode: autoRoute.owner_mode,
-        to_agents: autoRoute.to_agents,
-        required_capabilities: autoRoute.required_capabilities,
-        no_handoff_reason: null,
-        automation_context: 'default:' + canonicalAgentId(agent)
-      }
-      automationContext = handoffData.automation_context
-      automationUsed = true
-    }
-  }
-
-  // Enforce handoff requirement when hot files exist and flag is on
-  if (hotFiles.length > 0 && config.requireHandoffOnEndSession && handoffData === null) {
-    throw new Error(
-      'Handoff note required when hot files exist. Provide handoffData or set no_handoff_reason.'
-    )
-  }
-
-  content = setSectionBody(
-    content,
-    'Last Session',
-    [
-      '- **Agent:** ' + agent,
-      '- **Date:** ' + now,
-      '- **Summary:** ' + persistedSummary,
-      '- **Branch:** ' + branch,
-      '- **Commit:** ' + commit
-    ].join('\n')
-  )
-
-  content = setSectionBody(content, 'Current Health', formatHealthTable(health, healthOutputs))
-  content = setSectionBody(
-    content,
-    'Hot Files',
-    hotFiles.length > 0 ? hotFiles.map((file) => '- `' + file + '`').join('\n') : '*None*'
-  )
-
-  const inProgressBody = getSectionBody(content, 'In Progress')
-  const remainingInProgress = inProgressBody
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => !line.startsWith('<!--'))
-    .filter((line) => line)
-    .filter((line) => line.toLowerCase() !== '*nothing active*')
-    .filter((line) => !line.toLowerCase().includes(agent.toLowerCase()))
-
-  content = setSectionBody(
-    content,
-    'In Progress',
-    remainingInProgress.length > 0 ? remainingInProgress.join('\n') : '*Nothing active*'
-  )
-
-  const normalizedNextWork = toSingleLine(nextWork)
-  if (normalizedNextWork) {
-    const existingNext = getSectionBody(content, 'Suggested Next Work')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => !line.startsWith('<!--'))
-      .filter((line) => line)
-
-    content = setSectionBody(
-      content,
-      'Suggested Next Work',
-      [...existingNext, '- ' + normalizedNextWork].join('\n')
-    )
-  }
-
-  if (signatureChanges.length > 0) {
-    const existingGotchas = getSectionBody(content, 'Known Issues & Gotchas')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => !line.startsWith('<!--'))
-      .filter((line) => line)
-    const sigLines = signatureChanges.map(
-      ({ file, change }) =>
-        `- ⚠ Signature change in \`${file}\`: \`${change.trim().slice(0, 120)}\``
-    )
-    content = setSectionBody(
-      content,
-      'Known Issues & Gotchas',
-      [...existingGotchas, ...sigLines].join('\n')
-    )
-  }
-  // Persist handoff record if provided
-  let handoffRecord = null
-  let generatedPromptLines = []
-  if (handoffData !== null) {
-    const existingHandoffs = readHandoffs(workspaceFolder)
-    const allHandoffs = existingHandoffs.handoffs
-    const dateStr = now.slice(0, 10).replace(/-/g, '')
-    const seq = String(allHandoffs.length + 1).padStart(3, '0')
-    const handoffId = 'HO-' + dateStr + '-' + seq
-
-    if (handoffData.no_handoff_reason) {
-      // H5: validate skip reason before writing - previously bypassed validateHandoff()
-      const skipReason = String(handoffData.no_handoff_reason).trim()
-      if (!skipReason) throw new Error('no_handoff_reason must be a non-empty string')
-
-      // Skip record - agent opted out with an explicit reason
-      handoffRecord = {
-        handoff_id: handoffId,
-        task_id: null,
-        from_agent: canonicalAgentId(agent),
-        to_agents: [],
-        owner_mode: 'auto',
-        status: 'queued',
-        required_capabilities: ['skip-handoff'],
-        summary: 'Handoff skipped by agent',
-        notes: toSingleLine(handoffData.notes || ''),
-        no_handoff_reason: skipReason,
-        files: hotFiles,
-        branch,
-        commit,
-        prior_attempts: 0,
-        generated_prompt_lines: [],
-        prompt_copied_to_clipboard: false,
-        summary_source: summarySource,
-        automation_context: automationContext,
-        created_at: now,
-        updated_at: now,
-        state_history: [
-          { status: 'queued', agent: canonicalAgentId(agent), timestamp: now, reason: 'skipped' }
-        ]
-      }
-      const { valid, errors } = validateHandoff(handoffRecord)
-      if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
-    } else {
-      // Determine model tier recommendation based on task complexity
-      const modelTier = handoffData.recommended_model_tier || null
-      const modelJustification = handoffData.model_justification || null
-      const contextHints = handoffData.context_hints || null
-
-      // Full handoff record
-      handoffRecord = {
-        handoff_id: handoffId,
-        task_id: handoffData.task_id || null,
-        from_agent: canonicalAgentId(agent),
-        to_agents: (handoffData.to_agents || []).map((a) => canonicalAgentId(a)),
-        owner_mode: String(handoffData.owner_mode || 'single').toLowerCase(),
-        status: 'queued',
-        required_capabilities: handoffData.required_capabilities || [],
-        summary: toSingleLine(handoffData.summary || normalizedSummary || 'Session update'),
-        notes: toSingleLine(handoffData.notes || ''),
-        no_handoff_reason: null,
-        recommended_model_tier: modelTier,
-        model_justification: modelJustification ? toSingleLine(modelJustification) : null,
-        context_hints: contextHints,
-        files: hotFiles,
-        branch,
-        commit,
-        prior_attempts: 0,
-        generated_prompt_lines: [],
-        prompt_copied_to_clipboard: false,
-        summary_source: summarySource,
-        automation_context:
-          toSingleLine(handoffData.automation_context || automationContext || '') || null,
-        created_at: now,
-        updated_at: now,
-        state_history: [
-          {
-            status: 'queued',
-            agent: canonicalAgentId(agent),
-            timestamp: now,
-            reason: 'session ended with hot files'
-          }
-        ]
-      }
-
-      const { valid, errors } = validateHandoff(handoffRecord)
-      if (!valid) throw new Error('Invalid handoff: ' + errors.join('; '))
-    }
-
-    if (automationFeatureEnabled) {
-      generatedPromptLines = buildHandoffPromptLines(handoffRecord)
-      handoffRecord.generated_prompt_lines = generatedPromptLines
-    } else {
-      delete handoffRecord.generated_prompt_lines
-      delete handoffRecord.prompt_copied_to_clipboard
-      delete handoffRecord.summary_source
-      delete handoffRecord.automation_context
-    }
-
-    const updatedHandoffs = [...allHandoffs, handoffRecord]
-    writeHandoffs(workspaceFolder, { version: 1, handoffs: updatedHandoffs })
-    content = setSectionBody(
-      content,
-      'Agent Handoffs',
-      renderTrackerHandoffsSection(updatedHandoffs)
-    )
-  } else {
-    // Re-render the handoffs section from current store (in case handoffs changed externally)
-    const existingHandoffs = readHandoffs(workspaceFolder)
-    if (existingHandoffs.handoffs.length > 0) {
-      content = setSectionBody(
-        content,
-        'Agent Handoffs',
-        renderTrackerHandoffsSection(existingHandoffs.handoffs)
-      )
-    }
-  }
-
-  // C4: write tracker before state.json so that if state write fails, the session
-  // remains "Busy" in the UI (recoverable via Clear Active Session) rather than
-  // falsely appearing "Ready" while the tracker still shows the old session.
-  writeTracker(workspaceFolder, content)
-
-  // Compute open handoff summary for state.json so the panel can read it without opening handoffs.json
-  const currentHandoffs = readHandoffs(workspaceFolder)
-  const openHandoffs = currentHandoffs.handoffs.filter(isOpenHandoff)
-  const shouldWriteAutomationState =
-    automationFeatureEnabled &&
-    (automationUsed || summarySource === 'deterministic' || generatedPromptLines.length > 0)
-  const existingMetrics = readStateFile(workspaceFolder)?.sessionMetrics || {}
-  const stateLastSession = {
-    agent,
-    date: now,
-    summary: persistedSummary,
-    branch,
-    commit,
-    sessionMetrics: {
-      filesModified: existingMetrics.filesModified || 0,
-      commandsRun: existingMetrics.commandsRun || 0,
-      durationMs: Date.now() - (parseISODate(existingMetrics.startedAt) || Date.now())
-    }
-  }
-
-  if (shouldWriteAutomationState) {
-    stateLastSession.generatedSummary = normalizedSummary || persistedSummary
-    stateLastSession.summarySource = summarySource
-    stateLastSession.automationUsed = automationUsed
-    stateLastSession.generatedPrompts = generatedPromptLines
-  }
-
-  writeStateFile(workspaceFolder, {
-    sessionActive: false,
-    lastUpdated: now,
-    activeSession: null,
-    lastSession: stateLastSession,
-    health: Object.fromEntries(
-      Object.entries(health).map(([label, status]) => [
-        label,
-        { status, output: healthOutputs[label] || '' }
-      ])
-    ),
-    hotFiles,
-    inProgress: remainingInProgress,
-    openHandoffCount: openHandoffs.length,
-    activeHandoffIds: openHandoffs.map((h) => String(h.handoff_id || h.task_id || ''))
-  })
-
-  return {
-    health,
-    healthOutputs,
-    hotFiles,
-    handoff: handoffRecord,
-    generatedSummary: normalizedSummary || persistedSummary,
-    summarySource,
-    handoffPrompts: generatedPromptLines,
-    promptCopiedToClipboard: false,
-    signatureChanges,
-    complexityInfo
-  }
-}
-
-/**
- * Clear an active session flag without running End Session health checks.
- * Useful when a session was left open accidentally.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {{ cleared: boolean, agent: string | null }}
- */
-function clearActiveSessionCore(workspaceFolder) {
-  const statePath = getStatePath(workspaceFolder)
-  if (!fs.existsSync(statePath)) return { cleared: false, agent: null }
-
-  let state
-  try {
-    state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  } catch {
-    return { cleared: false, agent: null }
-  }
-
-  if (!state?.sessionActive || !state?.activeSession) {
-    return { cleared: false, agent: null }
-  }
-
-  const agent = String(state.activeSession.agent || '').trim() || null
-  const content = readTracker(workspaceFolder)
-  if (content) {
-    const inProgressBody = getSectionBody(content, 'In Progress')
-    const remaining = inProgressBody
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => !line.startsWith('<!--'))
-      .filter((line) => line)
-      .filter((line) => line.toLowerCase() !== '*nothing active*')
-      .filter((line) => !agent || !line.toLowerCase().includes(agent.toLowerCase()))
-
-    const updated = setSectionBody(
-      content,
-      'In Progress',
-      remaining.length > 0 ? remaining.join('\n') : '*Nothing active*'
-    )
-    writeTracker(workspaceFolder, updated)
-  }
-
   writeStateFile(workspaceFolder, {
     ...state,
-    sessionActive: false,
-    activeSession: null,
-    lastUpdated: new Date().toISOString()
+    lastUpdated: new Date().toISOString(),
+    activeSession: nextSession
   })
-
-  return { cleared: true, agent }
+  return nextSession
 }
+
+/**
+// ———————— Dashboard ————————————————————————————————————————————————————————
 
 // â”€â”€â”€ Drop-zone API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
@@ -2487,7 +1140,7 @@ async function processDropZoneRequest(workspaceFolder) {
       case 'startSession': {
         const { agent, goal } = request
         if (!agent) throw new Error('Missing required field: agent')
-        startSessionCore(workspaceFolder, agent, goal || 'Session started')
+        SessionManager.startSessionCore(workspaceFolder, agent, goal || 'Session started')
         const state = readStateFile(workspaceFolder)
         if (state?.sessionMetrics) {
           state.sessionMetrics.commandsRun = (state.sessionMetrics.commandsRun || 0) + 1
@@ -2516,7 +1169,7 @@ async function processDropZoneRequest(workspaceFolder) {
           generatedSummary,
           summarySource,
           handoffPrompts
-        } = await endSessionCore(
+        } = await SessionManager.endSessionCore(
           workspaceFolder,
           agent,
           summary || '',
@@ -2570,7 +1223,7 @@ async function processDropZoneRequest(workspaceFolder) {
       }
 
       case 'listHandoffs': {
-        const handoffs = listHandoffRecords(workspaceFolder)
+        const handoffs = utils.listHandoffRecords(workspaceFolder)
         writeResultFile(workspaceFolder, {
           ok: true,
           action,
@@ -2613,7 +1266,13 @@ async function processDropZoneRequest(workspaceFolder) {
         const reason = toSingleLine(request?.reason || '') || null
         if (!handoffId) throw new Error('Missing required field: handoffId')
         if (!agent) throw new Error('Missing required field: agent')
-        const result = completeHandoffRecord(workspaceFolder, handoffId, status, agent, reason)
+        const result = utils.completeHandoffRecord(
+          workspaceFolder,
+          handoffId,
+          status,
+          agent,
+          reason
+        )
         if (!result.ok) {
           writeResultFile(workspaceFolder, {
             ok: false,
@@ -2638,7 +1297,7 @@ async function processDropZoneRequest(workspaceFolder) {
         if (!handoff || typeof handoff !== 'object') {
           throw new Error('Missing required field: handoff')
         }
-        const created = createHandoffRecord(workspaceFolder, handoff)
+        const created = utils.createHandoffRecord(workspaceFolder, handoff)
         writeResultFile(workspaceFolder, {
           ok: true,
           action,
@@ -2672,1424 +1331,7 @@ async function processDropZoneRequest(workspaceFolder) {
 
 // â”€â”€â”€ Tree view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-
-
-/**
- * Build a normalized snapshot for the live webview dashboard.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- */
-function getDashboardModel(workspaceFolder, viewMode = 'compact') {
-  const snapshot = getWorkspaceSnapshot(workspaceFolder)
-  const trackerContent = snapshot.trackerContent
-  const tracker = snapshot.tracker
-  const state = snapshot.state
-  const config = snapshot.config
-  const handoffInfo = snapshot.handoffInfo
-  const inProgressLines = snapshot.inProgressLines
-  const currentAgentId = canonicalAgentId(
-    state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
-  )
-  const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentAgentId, staleAfterHours)
-  const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0
-  const opsState = getOperationalState(
-    state,
-    inProgressLines,
-    handoffInfo.handoffs,
-    autoStaleSessionMinutes
-  )
-  const warnings = trackerContent ? getTrackerWarnings(workspaceFolder, tracker) : []
-
-  // Session duration warning from tokenBudget config
-  const sessionWarnMinutes = config.tokenBudget?.sessionDurationWarningMinutes || 0
-  if (sessionWarnMinutes > 0 && state?.sessionActive && state?.activeSession?.startedAt) {
-    const started = parseISODate(state.activeSession.startedAt)
-    if (Number.isFinite(started)) {
-      const ageMinutes = (Date.now() - started) / 60000
-      if (ageMinutes >= sessionWarnMinutes) {
-        warnings.push(
-          `Session running ${formatElapsed(Date.now() - started)} \u2014 consider ending and handing off to reduce context size.`
-        )
-      }
-    }
-  }
-  const hotFiles = new Set(getHotFilesCached(workspaceFolder).map(normalizeRepoRelativePath))
-  const getSuggestedNextStep = () => {
-    if (!trackerContent) return 'Run "Initialize Workspace" to set up AgentSync files.'
-    if (state?.sessionActive)
-      return 'Use "End Session" when you are done, or "Clear Active Session" if stale.'
-    if (inProgressLines.length > 0)
-      return 'Review in-progress items, then start a new session to continue.'
-    if (handoffBuckets.open.length > 0)
-      return 'Open Handoffs JSON and pick the highest-priority open handoff.'
-    return 'Ready to start. Use "Start Session" before making changes.'
-  }
-  const onboarding = {
-    initialized: Boolean(trackerContent),
-    started:
-      Boolean(state?.sessionActive) ||
-      Boolean(state?.activeSession?.startedAt) ||
-      Boolean(state?.lastSession?.startedAt),
-    ended:
-      !state?.sessionActive &&
-      (Boolean(state?.lastSession?.endedAt) ||
-        (!isEmptyValue(tracker.date) && !isEmptyValue(tracker.summary)))
-  }
-
-  const toStatus = (entry) => {
-    const value = entry?.status ?? entry ?? 'Not configured'
-    return String(value || 'Not configured')
-  }
-
-  const health = state?.health || {}
-  const summarizeHandoff = (h) => ({
-    id: String(h?.handoff_id || h?.task_id || 'unknown'),
-    summary: String(h?.summary || h?.task_id || 'No summary'),
-    status: String(h?.status || 'queued'),
-    mode: String(h?.owner_mode || 'unknown'),
-    owners: Array.isArray(h?.to_agents) ? h.to_agents : []
-  })
-  // Full card data for interactive dashboard actions (Claim / Start / Skip)
-  const summarizeHandoffCard = (h, stale = false) => {
-    const files = Array.isArray(h?.files) ? h.files : []
-    const toAgents = Array.isArray(h?.to_agents) ? h.to_agents : []
-    return {
-      id: String(h?.handoff_id || h?.task_id || 'unknown'),
-      summary: String(h?.summary || 'No summary'),
-      from_agent: String(h?.from_agent || 'unknown'),
-      to_agents_display: toAgents.join(', ') || 'any',
-      files_display:
-        files.length > 3
-          ? files.slice(0, 3).join(', ') + ' (+' + (files.length - 3) + ' more)'
-          : files.join(', ') || 'none',
-      status: String(h?.status || 'queued'),
-      notes: String(h?.notes || ''),
-      recommended_model_tier: h?.recommended_model_tier || null,
-      model_justification: String(h?.model_justification || ''),
-      stale_observation: stale
-    }
-  }
-  const compactTasks = inProgressLines.slice(0, 2)
-  const compactExtraTaskCount = Math.max(0, inProgressLines.length - compactTasks.length)
-  const rawSessionGoal = String(state?.activeSession?.goal || '').trim()
-  const rawFirstInProgress = String(inProgressLines[0] || '').trim()
-  // Prefer state.json last session summary over parsing tracker markdown.
-  const rawTrackerSummary = String(state?.lastSession?.summary || tracker.summary || '').trim()
-  let focusText = 'No active goal'
-  if (!isEmptyValue(rawSessionGoal)) {
-    focusText = rawSessionGoal
-  } else if (!isEmptyValue(rawFirstInProgress)) {
-    focusText = rawFirstInProgress
-  } else if (!isEmptyValue(rawTrackerSummary)) {
-    focusText = rawTrackerSummary
-  }
-  const normalizedViewMode = viewMode === 'full' ? 'full' : 'compact'
-
-  const defaultShortcuts = [
-    'agentsync.startSession',
-    'agentsync.endSession',
-    'agentsync.openTracker',
-    'agentsync.contextStatus'
-  ]
-  const shortcuts =
-    Array.isArray(config.dashboardShortcuts) && config.dashboardShortcuts.length > 0
-      ? config.dashboardShortcuts
-      : defaultShortcuts
-
-  return {
-    hasWorkspace: true,
-    workspace: workspaceFolder.name,
-    ui: {
-      viewMode: normalizedViewMode
-    },
-    shortcuts,
-    state: {
-      key: opsState.key,
-      label: opsState.label,
-      reason: opsState.reason,
-      pulse: getStatePulseFrame(opsState.key)
-    },
-    refreshedAt: new Date().toISOString(),
-    nextStep: getSuggestedNextStep(),
-    onboarding,
-    session: {
-      active: Boolean(state?.sessionActive),
-      agent: state?.activeSession?.agent || 'None',
-      goal: state?.activeSession?.goal || 'No active goal',
-      startedAt: state?.activeSession?.startedAt || null
-    },
-    tracker: {
-      lastAgent: state?.lastSession?.agent || tracker.agent,
-      lastDate: state?.lastSession?.date || tracker.date,
-      lastSummary: state?.lastSession?.summary || tracker.summary,
-      branch: state?.lastSession?.branch || tracker.branch,
-      commit: state?.lastSession?.commit || tracker.commit
-    },
-    warnings,
-    inProgress: inProgressLines,
-    compact: {
-      focusText,
-      tasks: compactTasks,
-      extraTaskCount: compactExtraTaskCount
-    },
-    health: {
-      Build: toStatus(health.Build),
-      Tests: toStatus(health.Tests),
-      Deploy: toStatus(health.Deploy)
-    },
-    handoffs: {
-      exists: handoffInfo.exists,
-      parseError: handoffInfo.error,
-      openCount: handoffBuckets.open.length,
-      assignedToMe: handoffBuckets.assignedToMe.slice(0, 8).map(summarizeHandoff),
-      sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 8).map(summarizeHandoff),
-      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 8).map(summarizeHandoff),
-      queued: handoffBuckets.assignedToMe
-        .filter((h) => String(h?.status || '').toLowerCase() === 'queued')
-        .slice(0, 10)
-        .map((h) => {
-          const isStale = (h.files || []).some((file) =>
-            hotFiles.has(normalizeRepoRelativePath(file))
-          )
-          return summarizeHandoffCard(h, isStale)
-        })
-    }
-  }
-}
-
-/**
- * Build and persist a deterministic context capsule for downstream agents.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @returns {any}
- */
-function generateContextCapsule(workspaceFolder) {
-  const snapshot = getWorkspaceSnapshot(workspaceFolder, { force: true })
-  const state = snapshot.state || null
-  const tracker = snapshot.tracker || {
-    agent: PLACEHOLDER,
-    date: PLACEHOLDER,
-    summary: PLACEHOLDER,
-    branch: PLACEHOLDER,
-    commit: PLACEHOLDER
-  }
-  const handoffInfo = snapshot.handoffInfo || { handoffs: [] }
-  const config = snapshot.config || {}
-  const staleAfterHours = Number(config.staleAfterHours) || DEFAULT_STALE_HOURS
-  const currentAgentId = canonicalAgentId(
-    state?.activeSession?.agent || state?.lastSession?.agent || tracker.agent
-  )
-  const handoffBuckets = getHandoffBuckets(handoffInfo.handoffs, currentAgentId, staleAfterHours)
-  const autoStaleSessionMinutes = Number(config.autoStaleSessionMinutes) || 0
-  const opsState = getOperationalState(
-    state,
-    snapshot.inProgressLines || [],
-    handoffInfo.handoffs || [],
-    autoStaleSessionMinutes
-  )
-  const hotFiles = getHotFilesCached(workspaceFolder, { force: true })
-  const capsule = {
-    version: 1,
-    generatedAt: new Date().toISOString(),
-    workspace: workspaceFolder.name,
-    state: opsState,
-    session: {
-      active: Boolean(state?.sessionActive),
-      activeSession: state?.activeSession || null,
-      lastSession: state?.lastSession || null,
-      metrics: state?.sessionMetrics || null
-    },
-    tracker: {
-      agent: tracker.agent,
-      date: tracker.date,
-      summary: tracker.summary,
-      branch: tracker.branch,
-      commit: tracker.commit
-    },
-    hotFiles,
-    inProgress: snapshot.inProgressLines || [],
-    handoffs: {
-      openCount: handoffBuckets.open.length,
-      assignedToMe: handoffBuckets.assignedToMe.slice(0, 20),
-      sharedWithMe: handoffBuckets.sharedWithMe.slice(0, 20),
-      blockedOrStale: handoffBuckets.blockedOrStale.slice(0, 20)
-    },
-    warnings: getTrackerWarnings(workspaceFolder, tracker)
-  }
-  fs.mkdirSync(getAgentSyncDir(workspaceFolder), { recursive: true })
-  atomicWriteFileSync(getContextCapsulePath(workspaceFolder), JSON.stringify(capsule, null, 2))
-  invalidateWorkspaceCaches(workspaceFolder)
-  return capsule
-}
-
-/**
- * Build webview HTML for the animated AgentSync Live dashboard.
- * @returns {string}
- */
-function getDashboardHtml() {
-  const nonce = createNonce()
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AgentSync Live</title>
-  <style>
-    :root {
-      --bg: #060b08;
-      --card: rgba(8, 18, 13, 0.82);
-      --line: rgba(68, 112, 79, 0.5);
-      --text: #d7ffe5;
-      --muted: #9fc2aa;
-      --ready: #1fd678;
-      --busy: #ff4d57;
-      --waiting: #ffb347;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--text);
-      background: var(--bg);
-      font: 13px/1.45 "Consolas", "SFMono-Regular", "Menlo", monospace;
-      overflow: hidden;
-    }
-    #matrix {
-      position: fixed;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      opacity: 0.22;
-      pointer-events: none;
-    }
-    .backdrop {
-      position: fixed;
-      inset: 0;
-      background:
-        radial-gradient(circle at 15% 0%, rgba(43, 130, 78, 0.18), transparent 38%),
-        radial-gradient(circle at 85% 10%, rgba(20, 80, 55, 0.17), transparent 35%),
-        linear-gradient(180deg, rgba(6, 13, 9, 0.9), rgba(2, 7, 4, 0.96));
-      pointer-events: none;
-    }
-    .app {
-      position: relative;
-      z-index: 1;
-      height: 100vh;
-      overflow: auto;
-      padding: 12px;
-    }
-    .top {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
-    }
-    .title {
-      font-weight: 700;
-      letter-spacing: 0.4px;
-      margin-right: 4px;
-    }
-    .badge {
-      border: 1px solid transparent;
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-weight: 700;
-      text-transform: uppercase;
-      font-size: 11px;
-    }
-    .badge.ready { color: #103a25; background: var(--ready); border-color: #86ffc2; }
-    .badge.busy { color: #420e12; background: var(--busy); border-color: #ff9aa0; }
-    .badge.waiting { color: #4a2e04; background: var(--waiting); border-color: #ffd898; }
-    .pulse { color: var(--muted); opacity: 0.9; }
-    .mode-toggle {
-      margin-left: auto;
-      border: 1px solid var(--line);
-      background: rgba(11, 29, 18, 0.85);
-      color: var(--text);
-      border-radius: 7px;
-      padding: 4px 8px;
-      font: inherit;
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .mode-toggle:hover {
-      border-color: #6adf9a;
-      background: rgba(15, 40, 24, 0.9);
-    }
-    .actions {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-      gap: 7px;
-      margin-bottom: 10px;
-    }
-    .actions.busy button.action,
-    .compact-actions.busy button.action,
-    .compact-more-actions.busy button.action {
-      opacity: 0.65;
-      cursor: wait;
-    }
-    button.action {
-      border: 1px solid var(--line);
-      background: rgba(11, 29, 18, 0.82);
-      color: var(--text);
-      border-radius: 8px;
-      padding: 7px 8px;
-      font: inherit;
-      cursor: pointer;
-      text-align: left;
-    }
-    button.action:hover {
-      border-color: #6adf9a;
-      background: rgba(15, 40, 24, 0.9);
-    }
-    button.action.active-command,
-    button.recovery-action.active-command {
-      border-color: var(--active-command-color, #c8d2d8);
-      background: var(--active-command-bg, rgba(19, 33, 24, 0.92));
-      box-shadow:
-        0 0 0 1px var(--active-command-color, #c8d2d8),
-        0 0 12px -2px var(--active-command-color, #c8d2d8);
-    }
-    .compact-panel {
-      margin-bottom: 10px;
-      padding: 8px;
-    }
-    .compact-focus {
-      margin-bottom: 6px;
-      font-weight: 700;
-      color: #c0f0d3;
-    }
-    .compact-task-list {
-      margin: 0;
-      padding-left: 16px;
-      max-height: 90px;
-      overflow: auto;
-    }
-    .compact-task-list li {
-      margin: 3px 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .compact-task-list li.empty {
-      list-style: none;
-      margin-left: -16px;
-      color: var(--muted);
-    }
-    .compact-more-count {
-      min-height: 16px;
-      margin-top: 4px;
-      color: var(--muted);
-      font-size: 11px;
-    }
-    .compact-actions {
-      margin-top: 6px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-      gap: 5px;
-    }
-    .compact-more-actions {
-      margin-top: 5px;
-      display: none;
-      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-      gap: 5px;
-    }
-    .compact-more-actions.open {
-      display: grid;
-    }
-    button.action.compact-action {
-      font-size: 11px;
-      padding: 4px 6px;
-      min-height: 28px;
-      border-radius: 7px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
-      gap: 8px;
-    }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--card);
-      padding: 9px;
-      backdrop-filter: blur(2px);
-    }
-    .card h3 {
-      margin: 0 0 7px 0;
-      font-size: 12px;
-      letter-spacing: 0.3px;
-      color: #c0f0d3;
-      text-transform: uppercase;
-    }
-    .kv {
-      margin: 0;
-      display: grid;
-      grid-template-columns: auto 1fr;
-      column-gap: 8px;
-      row-gap: 4px;
-    }
-    .kv dt { color: var(--muted); }
-    .kv dd { margin: 0; }
-    ul.list {
-      margin: 0;
-      padding-left: 16px;
-      max-height: 220px;
-      overflow: auto;
-    }
-    ul.list li { margin: 3px 0; }
-    li.empty { color: var(--muted); list-style: none; margin-left: -16px; }
-    .hint {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .handoff-card {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px 9px;
-      margin-bottom: 6px;
-    }
-    .handoff-card-summary {
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .handoff-card-meta {
-      color: var(--muted);
-      font-size: 11px;
-      margin-top: 3px;
-    }
-    .handoff-card-actions {
-      display: flex;
-      gap: 5px;
-      margin-top: 6px;
-    }
-    .handoff-card-actions button {
-      font-size: 11px;
-      padding: 3px 7px;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      background: rgba(11, 29, 18, 0.82);
-      color: var(--text);
-      cursor: pointer;
-    }
-    .handoff-card-actions button:hover {
-      border-color: #6adf9a;
-    }
-    .status-pill {
-      display: inline-block;
-      border-radius: 8px;
-      padding: 1px 6px;
-      border: 1px solid var(--line);
-      margin-left: 5px;
-      font-size: 11px;
-      color: #d8ffe8;
-    }
-    .status-pass { border-color: #29ca72; color: #8df2b7; }
-    .status-fail { border-color: #ff6c74; color: #ffb2b6; }
-    .status-unknown { border-color: #888; color: #c9c9c9; }
-    .action-center {
-      margin-bottom: 10px;
-    }
-    .action-live {
-      border-left: 3px solid #49cc83;
-      padding-left: 8px;
-      margin-bottom: 7px;
-    }
-    .action-live.running { border-left-color: #ffb347; }
-    .action-live.error { border-left-color: #ff6c74; }
-    .action-title {
-      font-weight: 700;
-      margin-bottom: 2px;
-    }
-    .checklist {
-      margin: 8px 0 0 0;
-      padding-left: 0;
-      list-style: none;
-    }
-    .checklist li {
-      margin: 4px 0;
-      color: var(--muted);
-    }
-    .checklist li.done {
-      color: #8df2b7;
-    }
-    .recovery {
-      margin-top: 8px;
-      display: none;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .recovery.visible {
-      display: flex;
-    }
-    button.recovery-action {
-      border: 1px solid var(--line);
-      background: rgba(11, 29, 18, 0.82);
-      color: var(--text);
-      border-radius: 8px;
-      padding: 5px 8px;
-      font: inherit;
-      cursor: pointer;
-    }
-    button.recovery-action:hover {
-      border-color: #6adf9a;
-      background: rgba(15, 40, 24, 0.9);
-    }
-    body[data-view-mode="compact"] .full-panel {
-      display: none;
-    }
-    body[data-view-mode="full"] .compact-panel {
-      display: none;
-    }
-  </style>
-</head>
-<body data-state="ready" data-view-mode="compact">
-  <canvas id="matrix"></canvas>
-  <div class="backdrop"></div>
-  <div class="app">
-    <div class="top">
-      <div class="title">AgentSync Live</div>
-      <span id="stateBadge" class="badge ready">READY</span>
-      <span id="statePulse" class="pulse">[idle]</span>
-      <span id="workspaceName" class="pulse"></span>
-      <button id="modeToggle" class="mode-toggle" data-role="mode-toggle">Show Full</button>
-    </div>
-
-    <section id="compactPanel" class="card compact-panel">
-      <h3>Current Focus</h3>
-      <div id="compactFocus" class="compact-focus">No active goal</div>
-      <ul id="compactTasks" class="compact-task-list"></ul>
-      <div id="compactMoreCount" class="compact-more-count"></div>
-      <div class="compact-actions">
-        <button class="action compact-action" data-command="agentsync.startSession">Start Session</button>
-        <button class="action compact-action" data-command="agentsync.endSession">End Session</button>
-        <button class="action compact-action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
-        <button class="action compact-action" data-command="agentsync.openTracker">Open AgentTracker</button>
-        <button class="action compact-action" data-role="compact-more-toggle">More</button>
-      </div>
-      <div id="compactMoreActions" class="compact-more-actions">
-        <button class="action compact-action" data-command="agentsync.init">Initialize Workspace</button>
-        <button class="action compact-action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
-        <button class="action compact-action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
-        <button class="action compact-action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
-        <button class="action compact-action" data-command="agentsync.contextStatus">Context Status</button>
-        <button class="action compact-action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
-        <button class="action compact-action" data-command="agentsync.refreshPanel">Refresh</button>
-      </div>
-    </section>
-
-    <div id="fullPanel" class="full-panel">
-      <div class="actions">
-        <button class="action" data-command="agentsync.init">Initialize Workspace</button>
-        <button class="action" data-command="agentsync.startSession">Start Session</button>
-        <button class="action" data-command="agentsync.endSession">End Session</button>
-        <button class="action" data-command="agentsync.clearActiveSession">Clear Active Session</button>
-        <button class="action" data-command="agentsync.openTracker">Open AgentTracker</button>
-        <button class="action" data-command="agentsync.openHandoffs">Open Handoffs JSON</button>
-        <button class="action" data-command="agentsync.contextCapsule">Generate Context Capsule</button>
-        <button class="action" data-command="agentsync.syncAgencyRuns">Sync Agency Runs</button>
-        <button class="action" data-command="agentsync.contextStatus">Context Status</button>
-        <button class="action" data-command="agentsync.openTutorial">Open Interactive Tutorial</button>
-        <button class="action" data-command="agentsync.refreshPanel">Refresh</button>
-      </div>
-
-      <section class="card action-center">
-        <h3>Action Center</h3>
-        <div id="actionLive" class="action-live">
-          <div id="actionTitle" class="action-title">Idle</div>
-          <div id="actionDetail">Choose an action to begin.</div>
-        </div>
-        <div id="recoveryActions" class="recovery">
-          <button class="recovery-action" data-command="agentsync.openTracker">Open Tracker</button>
-          <button class="recovery-action" data-command="agentsync.refreshPanel">Refresh</button>
-        </div>
-        <dl class="kv">
-          <dt>Next step</dt><dd id="nextStep">-</dd>
-          <dt>Last update</dt><dd id="actionUpdated">-</dd>
-          <dt>Data refreshed</dt><dd id="dataRefreshed">-</dd>
-        </dl>
-        <ul id="onboardingList" class="checklist"></ul>
-      </section>
-
-      <div class="grid">
-        <section class="card">
-          <h3>Overview</h3>
-          <dl class="kv">
-            <dt>State</dt><dd id="stateText">-</dd>
-            <dt>Reason</dt><dd id="stateReason">-</dd>
-            <dt>Open handoffs</dt><dd id="openHandoffs">0</dd>
-            <dt>In progress</dt><dd id="inProgressCount">0</dd>
-          </dl>
-        </section>
-
-        <section class="card">
-          <h3>Session</h3>
-          <dl class="kv">
-            <dt>Active</dt><dd id="sessionActive">No</dd>
-            <dt>Agent</dt><dd id="sessionAgent">None</dd>
-            <dt>Goal</dt><dd id="sessionGoal">No active goal</dd>
-            <dt>Started</dt><dd id="sessionStarted">-</dd>
-          </dl>
-        </section>
-
-        <section class="card">
-          <h3>Health</h3>
-          <ul id="healthList" class="list"></ul>
-        </section>
-
-        <section class="card">
-          <h3>Handoffs</h3>
-          <div><strong>Assigned to me</strong></div>
-          <ul id="handoffAssigned" class="list"></ul>
-          <div style="margin-top: 6px;"><strong>Shared with me</strong></div>
-          <ul id="handoffShared" class="list"></ul>
-          <div style="margin-top: 6px;"><strong>Blocked / stale</strong></div>
-          <ul id="handoffBlocked" class="list"></ul>
-        </section>
-
-        <section class="card" id="queuedHandoffsSection">
-          <h3>Queued Handoffs</h3>
-          <div id="queuedHandoffsList"></div>
-        </section>
-
-        <section class="card">
-          <h3>Tracker</h3>
-          <dl class="kv">
-            <dt>Last agent</dt><dd id="lastAgent">-</dd>
-            <dt>Last date</dt><dd id="lastDate">-</dd>
-            <dt>Branch</dt><dd id="branch">-</dd>
-            <dt>Commit</dt><dd id="commit">-</dd>
-          </dl>
-        </section>
-
-        <section class="card">
-          <h3>Warnings</h3>
-          <ul id="warningsList" class="list"></ul>
-        </section>
-      </div>
-      <div class="hint">Tip: this live view auto-refreshes from AgentTracker + .agentsync files.</div>
-    </div>
-  </div>
-
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    let pendingCommand = null;
-    let lastActionAt = null;
-    let currentViewMode = 'compact';
-    let compactMoreOpen = false;
-
-    const commandLabels = {
-      'agentsync.init': 'Initialize Workspace',
-      'agentsync.startSession': 'Start Session',
-      'agentsync.endSession': 'End Session',
-      'agentsync.clearActiveSession': 'Clear Active Session',
-      'agentsync.openTracker': 'Open AgentTracker',
-      'agentsync.openHandoffs': 'Open Handoffs JSON',
-      'agentsync.contextCapsule': 'Generate Context Capsule',
-      'agentsync.syncAgencyRuns': 'Sync Agency Runs',
-      'agentsync.contextStatus': 'Context Status',
-      'agentsync.openTutorial': 'Open Interactive Tutorial',
-      'agentsync.refreshPanel': 'Refresh'
-    };
-    const commandColors = {
-      'agentsync.init': '#4fb3ff',
-      'agentsync.startSession': '#1fd678',
-      'agentsync.endSession': '#ffb347',
-      'agentsync.clearActiveSession': '#ff6c74',
-      'agentsync.openTracker': '#8ab4ff',
-      'agentsync.openHandoffs': '#8ab4ff',
-      'agentsync.contextCapsule': '#7fd8ff',
-      'agentsync.syncAgencyRuns': '#7ccf8a',
-      'agentsync.contextStatus': '#c59cff',
-      'agentsync.openTutorial': '#8ab4ff',
-      'agentsync.refreshPanel': '#3dd6d0'
-    };
-
-    function byId(id) {
-      return document.getElementById(id);
-    }
-
-    function setText(id, value) {
-      const el = byId(id);
-      if (el) el.textContent = value == null ? '-' : String(value);
-    }
-
-    function formatTime(value) {
-      if (!value) return '-';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return '-';
-      return date.toLocaleTimeString();
-    }
-
-    function normalizeMode(mode) {
-      return mode === 'full' ? 'full' : 'compact';
-    }
-
-    function setViewMode(mode) {
-      currentViewMode = normalizeMode(mode);
-      document.body.dataset.viewMode = currentViewMode;
-      const toggle = byId('modeToggle');
-      if (toggle) {
-        toggle.textContent = currentViewMode === 'compact' ? 'Show Full' : 'Show Compact';
-      }
-    }
-
-    function setCompactMoreOpen(nextOpen) {
-      compactMoreOpen = Boolean(nextOpen);
-      const moreActions = byId('compactMoreActions');
-      if (moreActions) {
-        moreActions.classList.toggle('open', compactMoreOpen);
-      }
-      const toggle = document.querySelector('[data-role="compact-more-toggle"]');
-      if (toggle) {
-        toggle.textContent = compactMoreOpen ? 'Less' : 'More';
-      }
-    }
-
-    function toRgba(hex, alpha) {
-      const normalized = String(hex || '').trim().replace('#', '');
-      if (!/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(normalized)) {
-        return 'rgba(200, 210, 216, ' + alpha + ')';
-      }
-      const expanded = normalized.length === 3
-        ? normalized.split('').map((c) => c + c).join('')
-        : normalized;
-      const r = parseInt(expanded.slice(0, 2), 16);
-      const g = parseInt(expanded.slice(2, 4), 16);
-      const b = parseInt(expanded.slice(4, 6), 16);
-      return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
-    }
-
-    function getCommandColor(command) {
-      return commandColors[command] || '#c8d2d8';
-    }
-
-    function renderShortcuts(shortcuts) {
-      const makeButton = (cmd) => {
-        const btn = document.createElement('button');
-        btn.className = 'action';
-        btn.setAttribute('data-command', cmd);
-        const fallbackLabel = cmd.includes('.') ? cmd.slice(cmd.lastIndexOf('.') + 1) : cmd;
-        btn.textContent = commandLabels[cmd] || fallbackLabel;
-        const color = getCommandColor(cmd);
-        btn.style.setProperty('--button-color', color);
-        return btn;
-      };
-      const compactContainer = document.querySelector('.compact-actions');
-      const fullContainer = document.querySelector('.actions');
-      [compactContainer, fullContainer].forEach((container) => {
-        if (!container) return;
-        container.innerHTML = '';
-        shortcuts.forEach((cmd) => {
-          const btn = makeButton(cmd);
-          container.appendChild(btn);
-        });
-      });
-    }
-
-    function clearActiveCommandHighlight() {
-      const highlighted = document.querySelectorAll('button.action.active-command, button.recovery-action.active-command');
-      highlighted.forEach((button) => {
-        button.classList.remove('active-command');
-        button.style.removeProperty('--active-command-color');
-        button.style.removeProperty('--active-command-bg');
-      });
-    }
-
-    function setActiveCommandHighlight(command) {
-      clearActiveCommandHighlight();
-      const color = getCommandColor(command);
-      const tint = toRgba(color, 0.18);
-      const targets = document.querySelectorAll('[data-command="' + command + '"]');
-      targets.forEach((target) => {
-        if (!(target instanceof HTMLElement)) return;
-        if (!target.matches('button.action, button.recovery-action')) return;
-        target.classList.add('active-command');
-        target.style.setProperty('--active-command-color', color);
-        target.style.setProperty('--active-command-bg', tint);
-      });
-    }
-
-    function formatCompactTask(value) {
-      const text = String(value || '').replace(/\\s+/g, ' ').trim();
-      if (!text) return '-';
-      if (text.length <= 90) return text;
-      return text.slice(0, 89) + '...';
-    }
-
-    function setActionVisual(state, title, detail) {
-      const live = byId('actionLive');
-      if (live) {
-        live.classList.remove('running', 'error');
-        if (state === 'running') live.classList.add('running');
-        if (state === 'error') live.classList.add('error');
-      }
-      setText('actionTitle', title);
-      setText('actionDetail', detail);
-      setText('actionUpdated', formatTime(lastActionAt));
-    }
-
-    function setRecoveryVisible(isVisible) {
-      const el = byId('recoveryActions');
-      if (!el) return;
-      el.classList.toggle('visible', Boolean(isVisible));
-    }
-
-    function setActionsBusy(isBusy) {
-      const actionContainers = document.querySelectorAll('.actions, .compact-actions, .compact-more-actions');
-      actionContainers.forEach((container) => {
-        container.classList.toggle('busy', Boolean(isBusy));
-      });
-
-      const buttons = document.querySelectorAll('button.action[data-command], button.recovery-action[data-command]');
-      buttons.forEach((button) => {
-        const command = button.getAttribute('data-command');
-        const keepEnabled = command === 'agentsync.refreshPanel';
-        button.disabled = isBusy && !keepEnabled;
-      });
-    }
-
-    function renderList(id, items, format, emptyLabel) {
-      const el = byId(id);
-      if (!el) return;
-      el.innerHTML = '';
-      if (!items || items.length === 0) {
-        const li = document.createElement('li');
-        li.className = 'empty';
-        li.textContent = emptyLabel;
-        el.appendChild(li);
-        return;
-      }
-      items.forEach((item) => {
-        const li = document.createElement('li');
-        li.textContent = format(item);
-        el.appendChild(li);
-      });
-    }
-
-    function healthClass(status) {
-      const normalized = String(status || '').toLowerCase();
-      if (normalized === 'pass') return 'status-pass';
-      if (normalized === 'fail') return 'status-fail';
-      return 'status-unknown';
-    }
-
-    function renderHealth(health) {
-      const rows = [
-        { name: 'Build', status: health.Build },
-        { name: 'Tests', status: health.Tests },
-        { name: 'Deploy', status: health.Deploy }
-      ];
-      const el = byId('healthList');
-      if (!el) return;
-      el.innerHTML = '';
-      rows.forEach((row) => {
-        const li = document.createElement('li');
-        const pill = document.createElement('span');
-        pill.className = 'status-pill ' + healthClass(row.status);
-        pill.textContent = row.status;
-        li.textContent = row.name + ': ';
-        li.appendChild(pill);
-        el.appendChild(li);
-      });
-    }
-
-    function formatHandoff(item) {
-      return item.id + ' | ' + item.summary + ' (' + item.status + ', ' + item.mode + ')';
-    }
-
-    function renderQueuedHandoffs(handoffs) {
-      const container = byId('queuedHandoffsList');
-      if (!container) return;
-      container.innerHTML = '';
-      if (!handoffs || handoffs.length === 0) {
-        const empty = document.createElement('p');
-        empty.className = 'empty';
-        empty.style.cssText = 'color:var(--muted);font-size:12px;margin:4px 0;';
-        empty.textContent = 'No queued handoffs assigned to you.';
-        container.appendChild(empty);
-        return;
-      }
-      handoffs.forEach((item) => {
-        const card = document.createElement('div');
-        card.className = 'handoff-card';
-
-        const summaryEl = document.createElement('div');
-        summaryEl.className = 'handoff-card-summary';
-        summaryEl.textContent = item.summary;
-        card.appendChild(summaryEl);
-
-        const metaEl = document.createElement('div');
-        metaEl.className = 'handoff-card-meta';
-        metaEl.textContent = 'From: ' + item.from_agent + ' | To: ' + item.to_agents_display + ' | Files: ' + item.files_display;
-        card.appendChild(metaEl);
-
-        if (item.recommended_model_tier) {
-          const tierEl = document.createElement('span');
-          tierEl.style.cssText = 'display:inline-block;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-top:4px;' +
-            (item.recommended_model_tier === 'lead' ? 'background:#ffb347;color:#1a1a1a;' : 'background:#3dd6d0;color:#1a1a1a;');
-          tierEl.textContent = item.recommended_model_tier === 'lead' ? 'Lead Model' : 'Worker Model';
-          if (item.model_justification) tierEl.title = item.model_justification;
-          card.appendChild(tierEl);
-        }
-
-        if (item.stale_observation) {
-          const staleEl = document.createElement('div');
-          staleEl.style.cssText = 'background: #ffb347; color: #1a1a1a; padding: 2px 6px; border-radius: 3px; font-size: 0.75em; margin-top: 4px;';
-          staleEl.textContent = '⚠ Context may be outdated — re-read these files';
-          card.appendChild(staleEl);
-        }
-
-        if (item.notes) {
-          const notesEl = document.createElement('div');
-          notesEl.className = 'handoff-card-meta';
-          notesEl.textContent = 'Notes: ' + item.notes;
-          card.appendChild(notesEl);
-        }
-
-        const actions = document.createElement('div');
-        actions.className = 'handoff-card-actions';
-
-        const claimBtn = document.createElement('button');
-        claimBtn.textContent = 'Claim';
-        claimBtn.setAttribute('data-handoff-action', 'claim');
-        claimBtn.setAttribute('data-handoff-id', item.id);
-        actions.appendChild(claimBtn);
-
-        const startBtn = document.createElement('button');
-        startBtn.textContent = 'Start';
-        startBtn.setAttribute('data-handoff-action', 'start');
-        startBtn.setAttribute('data-handoff-id', item.id);
-        actions.appendChild(startBtn);
-
-        const skipBtn = document.createElement('button');
-        skipBtn.textContent = 'Skip';
-        skipBtn.setAttribute('data-handoff-action', 'skip');
-        skipBtn.setAttribute('data-handoff-id', item.id);
-        actions.appendChild(skipBtn);
-
-        card.appendChild(actions);
-        container.appendChild(card);
-      });
-    }
-
-    function renderCompactSummary(compactModel) {
-      setText('compactFocus', compactModel.focusText || 'No active goal');
-      const compactTasks = Array.isArray(compactModel.tasks) ? compactModel.tasks : [];
-      renderList('compactTasks', compactTasks, (item) => formatCompactTask(item), 'No in-progress tasks');
-      const count = Number(compactModel.extraTaskCount) || 0;
-      const countEl = byId('compactMoreCount');
-      if (countEl) {
-        countEl.textContent = count > 0 ? '+' + count + ' more task' + (count === 1 ? '' : 's') : '';
-      }
-    }
-
-    function renderOnboarding(onboarding) {
-      const el = byId('onboardingList');
-      if (!el) return;
-      const stepRows = [
-        {
-          done: Boolean(onboarding && onboarding.initialized),
-          label: '1. Initialize workspace'
-        },
-        {
-          done: Boolean(onboarding && onboarding.started),
-          label: '2. Start first session'
-        },
-        {
-          done: Boolean(onboarding && onboarding.ended),
-          label: '3. End session and hand off'
-        }
-      ];
-      el.innerHTML = '';
-      stepRows.forEach((row) => {
-        const li = document.createElement('li');
-        li.className = row.done ? 'done' : '';
-        li.textContent = (row.done ? '[x] ' : '[ ] ') + row.label;
-        el.appendChild(li);
-      });
-    }
-
-    function getRunningHint(command, label) {
-      if (command === 'agentsync.startSession') {
-        return 'You may see prompts for agent name and goal. Fill those in, then wait for completion.';
-      }
-      if (command === 'agentsync.endSession') {
-        return 'You may see prompts for summary and next work. Complete them, then wait for confirmation.';
-      }
-      if (command === 'agentsync.init') {
-        return 'AgentSync files are being created now. You will see completion once file writes finish.';
-      }
-      return 'Watch for prompts in VS Code. This view will update when complete.';
-    }
-
-    function getFailureHint(command, message) {
-      const base = message || 'The command failed.';
-      if (command === 'agentsync.startSession' || command === 'agentsync.endSession') {
-        return base + ' Open Tracker to review required fields, then try again.';
-      }
-      if (command === 'agentsync.init') {
-        return base + ' Check workspace permissions and try Initialize Workspace again.';
-      }
-      return base + ' Try Refresh. If it persists, open AgentTracker for context.';
-    }
-
-    function render(model) {
-      if (!model || !model.hasWorkspace) {
-        setViewMode('compact');
-        setCompactMoreOpen(false);
-        clearActiveCommandHighlight();
-        setActionsBusy(false);
-        renderShortcuts([]);
-        setText('stateText', 'No workspace open');
-        setText('nextStep', 'Open a folder/workspace to use AgentSync.');
-        setText('compactFocus', 'No workspace open');
-        renderList('compactTasks', [], (item) => formatCompactTask(item), 'No in-progress tasks');
-        setText('compactMoreCount', '');
-        return;
-      }
-
-      setViewMode(model.ui && model.ui.viewMode);
-      renderShortcuts(model.shortcuts || []);
-
-      document.body.dataset.state = model.state.key;
-      const badge = byId('stateBadge');
-      if (badge) {
-        badge.className = 'badge ' + model.state.key;
-        badge.textContent = String(model.state.label || '').toUpperCase();
-      }
-      setText('statePulse', model.state.pulse);
-      setText('workspaceName', model.workspace);
-
-      setText('stateText', model.state.label);
-      setText('stateReason', model.state.reason);
-      setText('openHandoffs', model.handoffs.openCount);
-      setText('inProgressCount', model.inProgress.length);
-      setText('nextStep', model.nextStep || '-');
-      setText('dataRefreshed', formatTime(model.refreshedAt));
-      renderCompactSummary(model.compact || {});
-
-      setText('sessionActive', model.session.active ? 'Yes' : 'No');
-      setText('sessionAgent', model.session.agent);
-      setText('sessionGoal', model.session.goal);
-      setText('sessionStarted', model.session.startedAt ? new Date(model.session.startedAt).toLocaleString() : '-');
-      renderOnboarding(model.onboarding || {});
-
-      setText('lastAgent', model.tracker.lastAgent);
-      setText('lastDate', model.tracker.lastDate);
-      setText('branch', model.tracker.branch);
-      setText('commit', model.tracker.commit);
-
-      renderHealth(model.health);
-      renderList('handoffAssigned', model.handoffs.assignedToMe, formatHandoff, 'No direct assignments');
-      renderList('handoffShared', model.handoffs.sharedWithMe, formatHandoff, 'No shared assignments');
-      renderList('handoffBlocked', model.handoffs.blockedOrStale, formatHandoff, 'No blocked/stale handoffs');
-      renderQueuedHandoffs(model.handoffs.queued || []);
-      renderList('warningsList', model.warnings, (w) => w, 'No warnings');
-
-      if (!pendingCommand) {
-        clearActiveCommandHighlight();
-        const statusLabel = model.state && model.state.label ? model.state.label : 'Idle';
-        setActionVisual('ok', 'Idle', 'Current state: ' + statusLabel + '.');
-        setRecoveryVisible(false);
-      }
-    }
-
-    window.addEventListener('message', (event) => {
-      const msg = event.data || {};
-      if (msg.type === 'model') render(msg.model);
-      if (msg.type === 'action') {
-        const stage = String(msg.stage || '');
-        const command = String(msg.command || '');
-        const label = commandLabels[command] || command || 'Action';
-        lastActionAt = msg.timestamp || new Date().toISOString();
-
-        if (stage === 'started') {
-          pendingCommand = command;
-          setActionsBusy(true);
-          setActiveCommandHighlight(command);
-          setActionVisual(
-            'running',
-            'Running: ' + label,
-            getRunningHint(command, label)
-          );
-          setRecoveryVisible(false);
-          return;
-        }
-
-        if (stage === 'completed') {
-          pendingCommand = null;
-          setActionsBusy(false);
-          clearActiveCommandHighlight();
-          setActionVisual('ok', 'Completed: ' + label, 'Action finished successfully.');
-          setRecoveryVisible(false);
-          return;
-        }
-
-        if (stage === 'failed') {
-          pendingCommand = null;
-          setActionsBusy(false);
-          clearActiveCommandHighlight();
-          setActionVisual('error', 'Failed: ' + label, getFailureHint(command, msg.error || ''));
-          setRecoveryVisible(true);
-        }
-      }
-    });
-
-    document.addEventListener('click', (event) => {
-      const modeToggle = event.target.closest('[data-role="mode-toggle"]');
-      if (modeToggle) {
-        const next = currentViewMode === 'compact' ? 'full' : 'compact';
-        vscode.postMessage({ type: 'ui', action: 'setMode', mode: next });
-        return;
-      }
-
-      const moreToggle = event.target.closest('[data-role="compact-more-toggle"]');
-      if (moreToggle) {
-        setCompactMoreOpen(!compactMoreOpen);
-        return;
-      }
-
-      // Handoff card action buttons (Claim / Start / Skip)
-      const handoffBtn = event.target.closest('[data-handoff-action]');
-      if (handoffBtn) {
-        const action = handoffBtn.getAttribute('data-handoff-action');
-        const handoffId = handoffBtn.getAttribute('data-handoff-id');
-        if (action && handoffId) {
-          vscode.postMessage({ type: 'handoff-action', action, handoffId });
-        }
-        return;
-      }
-
-      const target = event.target.closest('[data-command]');
-      if (!target) return;
-      const command = target.getAttribute('data-command');
-      if (!command) return;
-      if (pendingCommand && command !== 'agentsync.refreshPanel') return;
-      vscode.postMessage({ command });
-    });
-
-    (function startMatrix() {
-      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      const canvas = byId('matrix');
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      const chars = '01ABCDEFGHIJKLMNOPQRSTUVWXYZ#$%&*+-';
-      const fontSize = 14;
-      let cols = 0;
-      let drops = [];
-
-      const resize = () => {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-        cols = Math.max(1, Math.floor(canvas.width / fontSize));
-        drops = Array(cols).fill(1);
-      };
-
-      const draw = () => {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.09)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#20f080';
-        ctx.font = fontSize + 'px monospace';
-        for (let i = 0; i < drops.length; i += 1) {
-          const text = chars[Math.floor(Math.random() * chars.length)];
-          ctx.fillText(text, i * fontSize, drops[i] * fontSize);
-          if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
-          drops[i] += 1;
-        }
-      };
-
-      resize();
-      window.addEventListener('resize', resize);
-      setInterval(draw, 60);
-    })();
-
-    setViewMode('compact');
-    setCompactMoreOpen(false);
-    vscode.postMessage({ command: 'agentsync.refreshPanel' });
-  </script>
-</body>
-</html>`
-}
-/**
- * Webview provider for the animated AgentSync Live dashboard.
- */
-class AgentSyncDashboardViewProvider {
-  /**
-   * @param {vscode.ExtensionContext} context
-   */
-  constructor(context) {
-    this.context = context
-    this.view = null
-  }
-
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @returns {string}
-   */
-  getViewModeKey(workspaceFolder) {
-    return `agentsync.dashboard.viewMode::${workspaceFolder.uri.fsPath}`
-  }
-
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @returns {'compact' | 'full'}
-   */
-  getViewMode(workspaceFolder) {
-    const key = this.getViewModeKey(workspaceFolder)
-    const stored = String(this.context.workspaceState.get(key, 'compact'))
-    return stored === 'full' ? 'full' : 'compact'
-  }
-
-  /**
-   * @param {vscode.WorkspaceFolder} workspaceFolder
-   * @param {string} mode
-   * @returns {Promise<void>}
-   */
-  async setViewMode(workspaceFolder, mode) {
-    const normalized = mode === 'full' ? 'full' : 'compact'
-    const key = this.getViewModeKey(workspaceFolder)
-    await this.context.workspaceState.update(key, normalized)
-  }
-
-  postAction(stage, command, error = null) {
-    if (!this.view) return
-    this.view.webview.postMessage({
-      type: 'action',
-      stage,
-      command,
-      error,
-      timestamp: new Date().toISOString()
-    })
-  }
-
-  refresh() {
-    if (!this.view) return
-    const workspaceFolder = getActiveWorkspaceFolder()
-    if (!workspaceFolder) {
-      this.view.webview.postMessage({ type: 'model', model: { hasWorkspace: false } })
-      return
-    }
-    const viewMode = this.getViewMode(workspaceFolder)
-    this.view.webview.postMessage({
-      type: 'model',
-      model: getDashboardModel(workspaceFolder, viewMode)
-    })
-  }
-
-  /**
-   * @param {vscode.WebviewView} webviewView
-   */
-  resolveWebviewView(webviewView) {
-    this.view = webviewView
-    webviewView.webview.options = { enableScripts: true }
-    webviewView.webview.html = getDashboardHtml()
-
-    webviewView.webview.onDidReceiveMessage(async (message) => {
-      if (message?.type === 'ui' && message?.action === 'setMode') {
-        const workspaceFolder = getActiveWorkspaceFolder()
-        if (!workspaceFolder) return
-        const mode = String(message?.mode || '')
-        if (mode === 'compact' || mode === 'full') {
-          await this.setViewMode(workspaceFolder, mode)
-          this.refresh()
-        }
-        return
-      }
-
-      if (message?.type === 'handoff-action') {
-        const workspaceFolder = getActiveWorkspaceFolder()
-        if (!workspaceFolder) return
-        await handleHandoffAction(workspaceFolder, message.action, message.handoffId, this.context)
-        this.refresh()
-        return
-      }
-
-      const command = String(message?.command || '')
-      if (!command) return
-      if (command === 'agentsync.refreshPanel') {
-        this.postAction('started', command)
-        this.refresh()
-        this.postAction('completed', command)
-        return
-      }
-      this.postAction('started', command)
-      try {
-        await vscode.commands.executeCommand(command)
-        this.postAction('completed', command)
-      } catch (err) {
-        const msg = err && err.message ? err.message : 'Unknown error'
-        this.postAction('failed', command, msg)
-      }
-      this.refresh()
-    })
-
-    webviewView.onDidDispose(() => {
-      if (this.view === webviewView) this.view = null
-    })
-
-    this.refresh()
-  }
-}
-
-/**
- * Handle a handoff action (claim / start / skip) triggered from the dashboard webview.
- * @param {vscode.WorkspaceFolder} workspaceFolder
- * @param {string} action
- * @param {string} handoffId
- * @param {vscode.ExtensionContext} context
- */
-async function handleHandoffAction(workspaceFolder, action, handoffId, context) {
-  const normalizedId = toSingleLine(handoffId)
-  if (!normalizedId) return
-
-  const state = readStateFile(workspaceFolder) || {}
-  const currentAgent = state?.activeSession?.agent || state?.lastSession?.agent || ''
-
-  if (action === 'claim') {
-    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
-    if (result.ok) {
-      syncTrackerHandoffsSection(workspaceFolder)
-      vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${normalizedId}.`)
-    } else {
-      vscode.window.showWarningMessage(
-        `AgentSync: Could not claim ${normalizedId} (${result.reason || 'unknown reason'}).`
-      )
-    }
-  } else if (action === 'start') {
-    const { handoffs } = readHandoffs(workspaceFolder)
-    const handoff = handoffs.find((h) => toSingleLine(h?.handoff_id) === normalizedId)
-    const goalPreFill = handoff ? toSingleLine(handoff.summary) : ''
-    const result = claimHandoffRecord(workspaceFolder, normalizedId, currentAgent)
-    if (result.ok) syncTrackerHandoffsSection(workspaceFolder)
-    await startSession(context, { goalPreFill, agentPreFill: currentAgent })
-  } else if (action === 'skip') {
-    const store = readHandoffs(workspaceFolder)
-    const now = new Date().toISOString()
-    const updated = store.handoffs.map((h) => {
-      if (toSingleLine(h?.handoff_id) !== normalizedId) return h
-      return {
-        ...h,
-        status: 'blocked',
-        updated_at: now,
-        state_history: [
-          ...(Array.isArray(h.state_history) ? h.state_history : []),
-          {
-            status: 'blocked',
-            agent: canonicalAgentId(currentAgent),
-            timestamp: now,
-            reason: 'skipped via dashboard'
-          }
-        ]
-      }
-    })
-    writeHandoffs(workspaceFolder, { version: 1, handoffs: updated })
-    syncTrackerHandoffsSection(workspaceFolder)
-    vscode.window.showInformationMessage(`AgentSync: Handoff ${normalizedId} marked as skipped.`)
-  }
-}
+// ———————— Tree View ——————————————————————————————————————————————————————
 
 /**
  * A single node in the AgentSync tree view.
@@ -4169,9 +1411,9 @@ class AgentSyncTreeDataProvider {
       handoffInfo.handoffs,
       autoStaleSessionMinutes
     )
-    const currentAgentId = canonicalAgentId(
-      state?.activeSession?.agent || state?.lastSession?.agent
-    )
+    const currentAgentId = getSessionProviderInfo(
+      state?.activeSession || state?.lastSession || null
+    ).id
 
     return [
       this._buildOverviewSection(
@@ -4227,7 +1469,11 @@ class AgentSyncTreeDataProvider {
         tooltip: opsState.reason
       }),
       new AgentSyncItem(
-        `Active session: ${state?.sessionActive ? state?.activeSession?.agent || 'Unknown' : 'None'}`,
+        `Active provider: ${
+          state?.sessionActive
+            ? getSessionProviderInfo(state?.activeSession || null).label || 'Unknown'
+            : 'None'
+        }`,
         vscode.TreeItemCollapsibleState.None,
         { icon: 'account' }
       ),
@@ -4276,6 +1522,12 @@ class AgentSyncTreeDataProvider {
         ),
         action('Start Session', 'agentsync.startSession', 'play', 'Begin tracking active work'),
         action(
+          'Run Next Step',
+          'agentsync.runNextStep',
+          'run',
+          'Claim the next runnable handoff and prepare its prompt'
+        ),
+        action(
           'End Session',
           'agentsync.endSession',
           'debug-stop',
@@ -4306,10 +1558,16 @@ class AgentSyncTreeDataProvider {
           'Show session metrics and context health'
         ),
         action(
-          'Open Interactive Tutorial',
+          'Open Walkthrough',
           'agentsync.openTutorial',
           'mortar-board',
-          'Open guided onboarding in Getting Started'
+          'Open guided onboarding in VS Code Getting Started'
+        ),
+        action(
+          'Open Web Docs',
+          'agentsync.openDocs',
+          'link-external',
+          'Open AgentSync documentation in your browser'
         )
       ]
     })
@@ -4317,7 +1575,7 @@ class AgentSyncTreeDataProvider {
 
   _buildSessionSection(state, staleInfo = { isStale: false, ageMs: null }) {
     if (!state || !state.sessionActive || !state.activeSession) {
-      const lastAgent = state?.lastSession?.agent
+      const lastAgent = state?.lastSession?.provider_label || state?.lastSession?.agent
       const lastDate = state?.lastSession?.date
       const tooltip = lastDate
         ? `Last session: ${lastAgent} on ${new Date(lastDate).toLocaleString()}`
@@ -4330,7 +1588,12 @@ class AgentSyncTreeDataProvider {
       })
     }
 
-    const { agent, goal, startedAt } = state.activeSession
+    const sessionProvider = getSessionProviderInfo(state.activeSession || null)
+    const sessionPersonality = getSessionPersonalityInfo(
+      getActiveWorkspaceFolder(),
+      state.activeSession || null
+    )
+    const { goal, startedAt } = state.activeSession
     const elapsed = formatElapsed(Date.now() - Date.parse(startedAt))
 
     const staleChild = staleInfo?.isStale
@@ -4359,14 +1622,23 @@ class AgentSyncTreeDataProvider {
       }
     )
 
-    return new AgentSyncItem(agent, vscode.TreeItemCollapsibleState.Expanded, {
+    return new AgentSyncItem(sessionProvider.label, vscode.TreeItemCollapsibleState.Expanded, {
       icon: staleInfo?.isStale ? 'warning' : 'record',
       iconColor: staleInfo?.isStale
         ? new vscode.ThemeColor('charts.yellow')
         : new vscode.ThemeColor('testing.iconPassed'),
       description: staleInfo?.isStale ? `stale ${elapsed}` : elapsed,
       contextValue: 'activeSession',
-      children: [goalChild, elapsedChild, ...(staleChild ? [staleChild] : [])]
+      children: [
+        new AgentSyncItem(
+          `Personality: ${sessionPersonality.name || 'None'}`,
+          vscode.TreeItemCollapsibleState.None,
+          { icon: 'library', tooltip: 'Active work personality' }
+        ),
+        goalChild,
+        elapsedChild,
+        ...(staleChild ? [staleChild] : [])
+      ]
     })
   }
 
@@ -4403,7 +1675,7 @@ class AgentSyncTreeDataProvider {
       })
     }
 
-    const buckets = getHandoffBuckets(handoffs, currentAgentId, staleAfterHours)
+    const buckets = utils.getHandoffBuckets(handoffs, currentAgentId, staleAfterHours)
     const openHandoffs = buckets.open
     const assignedToMe = buckets.assignedToMe
     const sharedWithMe = buckets.sharedWithMe
@@ -4413,13 +1685,19 @@ class AgentSyncTreeDataProvider {
       const id = h?.handoff_id || h?.task_id || 'unknown'
       const summary = (h?.summary || h?.task_id || 'No summary').trim()
       const status = String(h?.status || 'queued')
-      const owners = Array.isArray(h?.to_agents) ? h.to_agents.join(',') : ''
+      const owners = utils.getHandoffOwners(h).join(',')
+      const personality = getPersonalityDisplayName(
+        workspaceFolder,
+        utils.getHandoffPersonalityId(h)
+      )
       return new AgentSyncItem(`${id}: ${summary}`, vscode.TreeItemCollapsibleState.None, {
         icon: 'note',
         description: status,
-        tooltip: [`owners: ${owners || '(none)'}`, `mode: ${h?.owner_mode || 'unknown'}`].join(
-          '\n'
-        ),
+        tooltip: [
+          `owners: ${owners || 'provider-flex'}`,
+          `personality: ${personality || utils.getHandoffPersonalityId(h) || 'auto'}`,
+          `mode: ${h?.owner_mode || 'unknown'}`
+        ].join('\n'),
         command: { command: 'agentsync.openHandoffs', title: 'Open Handoffs JSON' }
       })
     }
@@ -4475,17 +1753,34 @@ class AgentSyncTreeDataProvider {
       const { icon, color } = statusIcon(status)
       const output = (entry?.output || '').trim()
       return new AgentSyncItem(label, vscode.TreeItemCollapsibleState.None, {
-        icon,
-        iconColor: color,
-        description: status,
-        tooltip: output ? `Last output:\n${output.slice(-300)}` : undefined
+        icon: status === 'Not configured' ? 'warning' : icon,
+        iconColor: status === 'Not configured' ? new vscode.ThemeColor('charts.yellow') : color,
+        description: status === 'Not configured' ? 'Setup needed' : status,
+        tooltip:
+          status === 'Not configured'
+            ? 'Configure this command in .agentsync.json or run Detect Build/Test Commands.'
+            : output
+              ? `Last output:\n${output.slice(-300)}`
+              : undefined,
+        command:
+          status === 'Not configured'
+            ? { command: 'agentsync.detectCommands', title: 'Detect Build/Test Commands' }
+            : undefined
       })
     })
 
     const hasFail = Object.values(health).some((e) => (e?.status ?? e) === 'Fail')
+    const hasSetupMissing = ['Build', 'Tests', 'Deploy'].some((label) => {
+      const entry = health[label]
+      return (entry?.status ?? entry ?? 'Not configured') === 'Not configured'
+    })
     return new AgentSyncItem('Health', vscode.TreeItemCollapsibleState.Collapsed, {
-      icon: hasFail ? 'error' : 'heart',
-      iconColor: hasFail ? new vscode.ThemeColor('testing.iconFailed') : undefined,
+      icon: hasFail ? 'error' : hasSetupMissing ? 'warning' : 'heart',
+      iconColor: hasFail
+        ? new vscode.ThemeColor('testing.iconFailed')
+        : hasSetupMissing
+          ? new vscode.ThemeColor('charts.yellow')
+          : undefined,
       children
     })
   }
@@ -4550,8 +1845,6 @@ class AgentSyncTreeDataProvider {
 
 // â”€â”€â”€ Status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-
-
 /**
  * Update status bar item from current AgentTracker.md state.
  * @param {vscode.StatusBarItem} statusItem
@@ -4603,8 +1896,19 @@ function updateStatusBar(statusItem) {
     const tooltipLines = []
     tooltipLines.push(`State: ${opsState.label}`)
     tooltipLines.push(opsState.reason)
+    if (state?.sessionActive && state?.activeSession) {
+      const activeProvider = getSessionProviderInfo(state.activeSession || null)
+      const activePersonality = getSessionPersonalityInfo(
+        workspaceFolder,
+        state.activeSession || null
+      )
+      tooltipLines.push(
+        `Active: ${activeProvider.label}${activePersonality.name && activePersonality.name !== 'None' ? ' | ' + activePersonality.name : ''}`
+      )
+    }
     // Prefer state.json lastSession fields for display; fall back to parsed tracker.
-    const displayAgent = state?.lastSession?.agent || tracker.agent
+    const displayAgent =
+      state?.lastSession?.provider_label || state?.lastSession?.agent || tracker.agent
     const displayDate = state?.lastSession?.date || tracker.date
     const displayBranch = state?.lastSession?.branch || tracker.branch
     const displayCommit = state?.lastSession?.commit || tracker.commit
@@ -4697,6 +2001,37 @@ async function initWorkspace(context, selectedFolder = null) {
   // Create default handoff store so the panel can render handoff state immediately.
   ensureHandoffsFile(workspaceFolder)
 
+  // If the workspace config requests symlink sync mode, move templates into
+  // `.agents/` and replace the created files with symlinks pointing at them.
+  try {
+    const cfg = readAgentSyncConfig(workspaceFolder)
+    if (cfg && cfg.sync && String(cfg.sync.mode || '').toLowerCase() === 'symlink') {
+      const agentsDir = path.join(root, '.agents')
+      fs.mkdirSync(agentsDir, { recursive: true })
+      for (const file of filesToCreate) {
+        const templateSrc = path.join(templatesDir, file.src)
+        const canonicalTarget = path.join(agentsDir, path.basename(file.dest))
+        try {
+          fs.copyFileSync(templateSrc, canonicalTarget)
+        } catch {}
+        // create symlink mapping from canonicalTarget -> dest
+        const relSource = path.relative(root, canonicalTarget)
+        try {
+          linker.syncAgentFiles(root, [{ source: relSource, dest: file.dest }], {
+            allowWindowsBypass: true
+          })
+        } catch (e) {
+          // log and continue
+          console.error('agentsync: linker error', e && e.message)
+        }
+      }
+      // refresh the dashboard/panel so UI reflects new files
+      try {
+        vscode.commands.executeCommand('agentsync.refreshPanel')
+      } catch {}
+    }
+  } catch (e) {}
+
   // Ensure .agentsync/ is gitignored so runtime files don't land in version control
   try {
     const gitignorePath = path.join(root, '.gitignore')
@@ -4724,7 +2059,8 @@ async function initWorkspace(context, selectedFolder = null) {
   const choice = await vscode.window.showInformationMessage(
     `AgentSync: Workspace "${workspaceFolder.name}" initialized. ${summary}`,
     'Open AgentSync Panel',
-    'Open Interactive Tutorial'
+    'Open Walkthrough',
+    'Open Web Docs'
   )
 
   // prompt for user role if not already set
@@ -4741,12 +2077,17 @@ async function initWorkspace(context, selectedFolder = null) {
         'AgentSync: Could not focus the panel. Run "View: Reset View Locations" and try again.'
       )
     }
-  } else if (choice === 'Open Interactive Tutorial') {
+  } else if (choice === 'Open Walkthrough') {
     const opened = await openAgentSyncTutorial(context)
     if (!opened) {
       vscode.window.showWarningMessage(
-        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
+        'AgentSync: Could not open the walkthrough. Open "Getting Started" and select AgentSync.'
       )
+    }
+  } else if (choice === 'Open Web Docs') {
+    const opened = await openAgentSyncDocs(context)
+    if (!opened) {
+      vscode.window.showWarningMessage('AgentSync: Could not open the documentation URL.')
     }
   }
 
@@ -4790,6 +2131,21 @@ async function openHandoffs() {
   await vscode.window.showTextDocument(doc)
 }
 
+async function openConfigFile() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+
+  const configPath = getConfigPath(workspaceFolder)
+  if (!fs.existsSync(configPath)) {
+    writeConfigFile(workspaceFolder, readAgentSyncConfig(workspaceFolder))
+  }
+  const doc = await vscode.workspace.openTextDocument(configPath)
+  await vscode.window.showTextDocument(doc)
+}
+
 /**
  * Show a compact handoff summary and open the handoff store file.
  * @returns {Promise<void>}
@@ -4801,8 +2157,8 @@ async function listHandoffsCommand() {
     return
   }
   ensureHandoffsFile(workspaceFolder)
-  const handoffs = listHandoffRecords(workspaceFolder)
-  const openCount = handoffs.filter((h) => isOpenHandoff(h)).length
+  const handoffs = utils.listHandoffRecords(workspaceFolder)
+  const openCount = handoffs.filter((h) => utils.isOpenHandoff(h)).length
   const detail = [
     `Total handoffs: ${handoffs.length}`,
     `Open handoffs: ${openCount}`,
@@ -4831,9 +2187,9 @@ async function claimHandoffCommand() {
   const agent = await promptForAgent(defaultAgent)
   if (!agent) return
 
-  const queued = listHandoffRecords(workspaceFolder).filter(
-    (h) => String(h?.status || '').toLowerCase() === 'queued'
-  )
+  const queued = utils
+    .listHandoffRecords(workspaceFolder)
+    .filter((h) => String(h?.status || '').toLowerCase() === 'queued')
   if (queued.length === 0) {
     vscode.window.showInformationMessage('AgentSync: No queued handoffs to claim.')
     return
@@ -4859,6 +2215,41 @@ async function claimHandoffCommand() {
   }
   syncTrackerHandoffsSection(workspaceFolder)
   vscode.window.showInformationMessage(`AgentSync: Claimed handoff ${selected.label}.`)
+
+  // Show agent personality context if the handoff has one
+  const handoffRecord = utils
+    .listHandoffRecords(workspaceFolder)
+    .find((h) => toSingleLine(h?.handoff_id) === selected.label)
+  const personalityId =
+    handoffRecord?.agent_personality_id || handoffRecord?.suggested_agent_personality_id
+  if (personalityId) {
+    try {
+      const catalog = getAgentCatalog(workspaceFolder)
+      const agent = catalog?.agents?.find((a) => a.id === personalityId)
+      if (agent) {
+        const activateChoice = await vscode.window.showInformationMessage(
+          'This handoff suggests agent personality: ' + agent.name + '. Activate it?',
+          'Activate',
+          'View',
+          'Skip'
+        )
+        if (activateChoice === 'Activate') {
+          injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, agent)
+          vscode.window.showInformationMessage(
+            'AgentSync: Agent personality ' + agent.name + ' activated.'
+          )
+        } else if (activateChoice === 'View') {
+          const doc = await vscode.workspace.openTextDocument({
+            content: '# ' + agent.name + '\n\n' + agent.promptBody,
+            language: 'markdown'
+          })
+          await vscode.window.showTextDocument(doc, { preview: true })
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
 }
 
 /**
@@ -4877,9 +2268,9 @@ async function completeHandoffCommand() {
   const agent = await promptForAgent(defaultAgent)
   if (!agent) return
 
-  const candidates = listHandoffRecords(workspaceFolder).filter((h) =>
-    OPEN_HANDOFF_STATUSES.has(String(h?.status || '').toLowerCase())
-  )
+  const candidates = utils
+    .listHandoffRecords(workspaceFolder)
+    .filter((h) => OPEN_HANDOFF_STATUSES.has(String(h?.status || '').toLowerCase()))
   if (candidates.length === 0) {
     vscode.window.showInformationMessage('AgentSync: No open handoffs to complete.')
     return
@@ -4918,7 +2309,7 @@ async function completeHandoffCommand() {
   })
   if (reasonInput === undefined) return
 
-  const result = completeHandoffRecord(
+  const result = utils.completeHandoffRecord(
     workspaceFolder,
     selected.label,
     statusPick.label,
@@ -5016,7 +2407,7 @@ async function clearActiveSession() {
   )
   if (choice !== 'Clear Session') return
 
-  const result = clearActiveSessionCore(workspaceFolder)
+  const result = SessionManager.clearActiveSessionCore(workspaceFolder)
   if (!result.cleared) {
     vscode.window.showErrorMessage('AgentSync: Could not clear active session.')
     return
@@ -5079,6 +2470,7 @@ async function startSession(context, options = {}) {
           )
           if (claimResult.ok) syncTrackerHandoffsSection(workspaceFolder)
           goalPreFill = goalPreFill || toSingleLine(candidate.summary)
+          claimedHandoff = candidate
           vscode.window.showInformationMessage(
             `AgentSync: Picked up handoff ${candidate.handoff_id}: ${toSingleLine(candidate.summary)}`
           )
@@ -5117,7 +2509,18 @@ async function startSession(context, options = {}) {
   }
 
   try {
-    startSessionCore(workspaceFolder, agent, goal)
+    const personality = claimedHandoff
+      ? resolveHandoffPersonality(workspaceFolder, claimedHandoff)
+      : null
+    SessionManager.startSessionCore(workspaceFolder, agent, goal, {
+      providerId: getExecutionProviderId(agent),
+      providerLabel: getExecutionProviderLabel(agent),
+      personalityId: personality?.id || utils.getHandoffPersonalityId(claimedHandoff) || null,
+      personalityName:
+        personality?.name ||
+        getPersonalityDisplayName(workspaceFolder, utils.getHandoffPersonalityId(claimedHandoff)) ||
+        null
+    })
   } catch (err) {
     vscode.window.showErrorMessage(`AgentSync: ${err.message}`)
     return
@@ -5374,15 +2777,22 @@ async function endSession(context) {
   let result
   try {
     // M1/C4: endSessionCore is async (non-blocking health checks)
-    result = await endSessionCore(workspaceFolder, agent, summary, nextWork, handoffData, {
-      hotFiles: precomputedHotFiles,
-      healthResults: precomputedHealth,
-      healthOutputs: precomputedHealthOutputs,
-      summarySource,
-      automationUsed,
-      automationContext,
-      goalHint
-    })
+    result = await SessionManager.endSessionCore(
+      workspaceFolder,
+      agent,
+      summary,
+      nextWork,
+      handoffData,
+      {
+        hotFiles: precomputedHotFiles,
+        healthResults: precomputedHealth,
+        healthOutputs: precomputedHealthOutputs,
+        summarySource,
+        automationUsed,
+        automationContext,
+        goalHint
+      }
+    )
   } catch (err) {
     vscode.window.showErrorMessage('AgentSync: ' + err.message)
     return
@@ -5632,7 +3042,7 @@ function startSessionReminderTimer(context) {
       const ageLabel = Math.floor(ageHours) + 'h'
       vscode.window
         .showWarningMessage(
-          `AgentSync: ${state.activeSession.agent}'s session in "${folder.name}" has been running for ${ageLabel}. Time to wrap up?`,
+          `AgentSync: ${getSessionProviderInfo(state.activeSession || null).label}'s session in "${folder.name}" has been running for ${ageLabel}. Time to wrap up?`,
           'End Session',
           'Dismiss'
         )
@@ -5705,14 +3115,499 @@ class AgentSyncHotFileDecorationProvider {
   }
 }
 
+// ━━━ Agent Catalog ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Initialize or refresh the in-memory agent catalog.
+ * Loads bundled agents from templates/agents/ and optionally workspace agents.
+ * @param {vscode.WorkspaceFolder | null} workspaceFolder
+ */
+function loadAgentCatalog(workspaceFolder) {
+  const base = _extensionPath || __dirname
+  const bundledDir = path.join(base, 'templates', 'agents')
+  const rootDirs = [bundledDir]
+
+  if (workspaceFolder) {
+    const wsAgentsDir = path.join(workspaceFolder.uri.fsPath, '.agentsync', 'agents')
+    if (fs.existsSync(wsAgentsDir)) {
+      rootDirs.push(wsAgentsDir)
+    }
+  }
+
+  _agentCatalog = buildCatalog({ rootDirs })
+  return _agentCatalog
+}
+
+/**
+ * Get the cached agent catalog, loading if needed.
+ * @param {vscode.WorkspaceFolder | null} [workspaceFolder]
+ * @returns {{ schemaVersion: string, agents: object[], categories: string[], lastIndexedAt: string }}
+ */
+function getAgentCatalog(workspaceFolder) {
+  if (!_agentCatalog) loadAgentCatalog(workspaceFolder || null)
+  return _agentCatalog
+}
+
+/**
+ * Browse agents command -- QuickPick grouped by category.
+ */
+async function browseAgentsCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  const catalog = getAgentCatalog(workspaceFolder)
+
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  const items = []
+  const sortedCategories = [...catalog.categories].sort()
+  for (const category of sortedCategories) {
+    const categoryAgents = catalog.agents.filter((a) => a.category === category)
+    if (categoryAgents.length === 0) continue
+
+    items.push({
+      label: category.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      kind: vscode.QuickPickItemKind.Separator
+    })
+
+    for (const agent of categoryAgents) {
+      items.push({
+        label: agent.name,
+        description: agent.category,
+        detail: agent.description,
+        agentId: agent.id
+      })
+    }
+  }
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Browse agent personalities (' + catalog.agents.length + ' available)',
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  })
+  if (!selected || !selected.agentId) return
+
+  // Open agent prompt body in a read-only preview
+  const agent = catalog.agents.find((a) => a.id === selected.agentId)
+  if (!agent) return
+
+  const doc = await vscode.workspace.openTextDocument({
+    content:
+      '# ' +
+      agent.name +
+      '\n\n**Category:** ' +
+      agent.category +
+      '\n**Description:** ' +
+      agent.description +
+      '\n**ID:** ' +
+      agent.id +
+      '\n\n---\n\n' +
+      agent.promptBody,
+    language: 'markdown'
+  })
+  await vscode.window.showTextDocument(doc, { preview: true })
+}
+
+/**
+ * Resolve the best matching personality for a handoff.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {any} handoff
+ * @returns {object | null}
+ */
+function resolveHandoffPersonality(workspaceFolder, handoff) {
+  const catalog = getAgentCatalog(workspaceFolder)
+  if (!catalog || !Array.isArray(catalog.agents) || catalog.agents.length === 0) return null
+
+  const explicitId = utils.getHandoffPersonalityId(handoff)
+  if (explicitId) {
+    const direct = catalog.agents.find((agent) => canonicalAgentId(agent.id) === explicitId)
+    if (direct) return direct
+  }
+
+  const matched = matchAgentsByCapabilities(catalog.agents, handoff?.required_capabilities || [])
+  return matched[0] || null
+}
+
+function buildHandoffExecutionInstruction(handoff) {
+  const lines = [String(handoff?.summary || 'Continue the queued work').trim()]
+
+  if (handoff?.notes) {
+    lines.push('', 'Notes:', String(handoff.notes).trim())
+  }
+
+  if (Array.isArray(handoff?.files) && handoff.files.length > 0) {
+    lines.push('', 'Start with these files:')
+    handoff.files.forEach((file) => lines.push('- ' + file))
+  }
+
+  if (handoff?.branch || handoff?.commit) {
+    lines.push('', `Branch: ${handoff?.branch || PLACEHOLDER}`)
+    lines.push(`Commit: ${handoff?.commit || PLACEHOLDER}`)
+  }
+
+  return lines.join('\n')
+}
+
+async function runHandoffStep(workspaceFolder, handoff, providerLabel, options = {}) {
+  const providerId = getExecutionProviderId(providerLabel)
+  const providerDisplay =
+    getExecutionProviderLabel(providerLabel) || String(providerLabel || 'Unknown')
+  const result = claimHandoffRecord(
+    workspaceFolder,
+    toSingleLine(handoff?.handoff_id),
+    providerDisplay
+  )
+  if (!result.ok) {
+    vscode.window.showWarningMessage(
+      `AgentSync: Could not claim ${handoff?.handoff_id || 'handoff'} (${result.reason || 'unknown reason'}).`
+    )
+    return false
+  }
+
+  syncTrackerHandoffsSection(workspaceFolder)
+
+  const personality = resolveHandoffPersonality(workspaceFolder, handoff)
+  const personalityId = personality?.id || utils.getHandoffPersonalityId(handoff) || null
+  const personalityName =
+    personality?.name || getPersonalityDisplayName(workspaceFolder, personalityId) || null
+
+  if (personality && !utils.getHandoffPersonalityId(handoff) && toSingleLine(handoff?.handoff_id)) {
+    const store = readHandoffs(workspaceFolder)
+    const next = store.handoffs.map((entry) => {
+      if (toSingleLine(entry?.handoff_id) !== toSingleLine(handoff?.handoff_id)) return entry
+      return {
+        ...entry,
+        suggested_agent_personality_id: personality.id,
+        updated_at: new Date().toISOString()
+      }
+    })
+    writeHandoffs(workspaceFolder, { version: 1, handoffs: next })
+  }
+
+  if (personality) {
+    injectPersonalityToWorkspace(workspaceFolder.uri.fsPath, personality)
+  }
+
+  if (options.ensureSession) {
+    SessionManager.startSessionCore(
+      workspaceFolder,
+      providerDisplay,
+      toSingleLine(handoff?.summary),
+      {
+        providerId,
+        providerLabel: providerDisplay,
+        personalityId,
+        personalityName
+      }
+    )
+  } else {
+    updateActiveSessionContext(workspaceFolder, {
+      ...buildSessionIdentity(workspaceFolder, providerDisplay, {
+        providerId,
+        providerLabel: providerDisplay,
+        personalityId,
+        personalityName
+      }),
+      goal: toSingleLine(handoff?.summary) || 'Continue queued work'
+    })
+  }
+
+  const instruction = buildHandoffExecutionInstruction(handoff)
+  const assembledPrompt = personality
+    ? assembleAgentPrompt(personality, instruction, { contextFiles: handoff?.files || [] })
+    : ['# Task', '', instruction].join('\n')
+  const delivery = await deliverPrompt('clipboard', { vscodeEnv: vscode.env }, assembledPrompt)
+  updateHandoffPromptCopiedFlag(workspaceFolder, handoff?.handoff_id, delivery.ok)
+
+  if (delivery.ok) {
+    const suffix = personalityName ? ` Personality: ${personalityName}.` : ''
+    vscode.window.showInformationMessage(
+      `AgentSync: Next step prepared for ${providerDisplay}.${suffix} Prompt copied to clipboard.`
+    )
+    return true
+  }
+
+  vscode.window.showErrorMessage('AgentSync: Failed to copy the next-step prompt to clipboard.')
+  return false
+}
+
+async function runNextStepCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+
+  const state = readStateFile(workspaceFolder) || {}
+  const activeProvider = getSessionProviderInfo(state?.activeSession || null)
+  const lastProvider = getSessionProviderInfo(state?.lastSession || null)
+  const providerId = state?.sessionActive ? activeProvider.id : null
+  const candidates = listRunnableQueuedHandoffs(workspaceFolder, providerId)
+  if (candidates.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No runnable queued handoffs found.')
+    return
+  }
+
+  let handoff = candidates[0]
+  if (candidates.length > 1) {
+    const selection = await vscode.window.showQuickPick(
+      candidates.map((item) => {
+        const owners = utils.getHandoffOwners(item)
+        const personalityName = getPersonalityDisplayName(
+          workspaceFolder,
+          utils.getHandoffPersonalityId(item)
+        )
+        return {
+          label: toSingleLine(item?.handoff_id) || 'unknown',
+          description: toSingleLine(item?.summary) || 'No summary',
+          detail:
+            (personalityName ? 'Personality: ' + personalityName + ' | ' : '') +
+            'Owners: ' +
+            (owners.length > 0 ? owners.join(', ') : 'provider-flex'),
+          handoff: item
+        }
+      }),
+      {
+        placeHolder: 'Select the next runnable handoff',
+        ignoreFocusOut: true
+      }
+    )
+    if (!selection?.handoff) return
+    handoff = selection.handoff
+  }
+
+  let providerLabel = activeProvider.label
+  if (!state?.sessionActive) {
+    const ownerDefaults = utils.getHandoffOwners(handoff)
+    const defaultProvider = ownerDefaults[0] || lastProvider.label || 'Codex'
+    providerLabel = await promptForAgent(defaultProvider)
+    if (!providerLabel) return
+  }
+
+  await runHandoffStep(workspaceFolder, handoff, providerLabel, {
+    ensureSession: !state?.sessionActive
+  })
+}
+
+/**
+ * Run with personality command -- select a personality, enter instruction, copy prompt to clipboard.
+ */
+async function runWithAgentCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  const catalog = getAgentCatalog(workspaceFolder)
+
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  // Step 1: Select agent
+  const items = catalog.agents.map((agent) => ({
+    label: agent.name,
+    description: agent.category,
+    detail: agent.description,
+    agentId: agent.id
+  }))
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select an agent personality',
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true
+  })
+  if (!selected || !selected.agentId) return
+
+  const agent = catalog.agents.find((a) => a.id === selected.agentId)
+  if (!agent) return
+
+  // Step 2: Enter instruction
+  const instruction = await vscode.window.showInputBox({
+    prompt: 'Enter your instruction for ' + agent.name,
+    placeHolder: 'Example: Refactor the authentication module to use JWT tokens',
+    ignoreFocusOut: true
+  })
+  if (instruction === undefined || !instruction.trim()) return
+
+  // Step 3: Assemble and deliver prompt
+  const assembledPrompt = assembleAgentPrompt(agent, instruction.trim())
+  const result = await deliverPrompt('clipboard', { vscodeEnv: vscode.env }, assembledPrompt)
+
+  if (result.ok) {
+    vscode.window.showInformationMessage(
+      'AgentSync: Personality prompt copied to clipboard \u2014 paste into your AI tool. Personality: ' +
+        agent.name
+    )
+  } else {
+    vscode.window.showErrorMessage('AgentSync: Failed to copy the personality prompt to clipboard.')
+  }
+}
+
+/**
+ * Create a pipeline (chain) of agents for sequential execution.
+ */
+async function createPipelineCommand() {
+  const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+    return
+  }
+
+  const catalog = getAgentCatalog(workspaceFolder)
+  if (!catalog || catalog.agents.length === 0) {
+    vscode.window.showInformationMessage('AgentSync: No agents found in catalog.')
+    return
+  }
+
+  // Step 1: Enter pipeline goal
+  const goalInput = await vscode.window.showInputBox({
+    prompt: 'Enter the pipeline goal / instruction',
+    placeHolder: 'Example: Design, implement, and test a new REST endpoint',
+    ignoreFocusOut: true
+  })
+  if (goalInput === undefined || !goalInput.trim()) return
+  const goal = goalInput.trim()
+
+  // Step 2: Select agents in sequence
+  const selectedAgents = []
+  let pipelineBuilding = true
+  while (pipelineBuilding) {
+    const agentItems = [
+      { label: '$(check) Done', description: 'Finish building the pipeline', agentId: null },
+      ...catalog.agents.map((agent) => ({
+        label: agent.name,
+        description: agent.category + (selectedAgents.length > 0 ? '' : ' (first step)'),
+        detail: agent.description,
+        agentId: agent.id
+      }))
+    ]
+
+    const stepLabel =
+      selectedAgents.length === 0
+        ? 'Select the first personality in the pipeline'
+        : 'Select step ' +
+          (selectedAgents.length + 1) +
+          ' (or Done to finish). Current: ' +
+          selectedAgents.map((a) => a.name).join(' -> ')
+
+    const pick = await vscode.window.showQuickPick(agentItems, {
+      placeHolder: stepLabel,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true
+    })
+    if (!pick) return // cancelled
+
+    if (!pick.agentId) {
+      if (selectedAgents.length < 2) {
+        vscode.window.showWarningMessage('AgentSync: Pipeline needs at least 2 agents.')
+        continue
+      }
+      pipelineBuilding = false
+      continue
+    }
+
+    const agent = catalog.agents.find((a) => a.id === pick.agentId)
+    if (agent) selectedAgents.push(agent)
+  }
+
+  // Step 3: Create linked handoff chain
+  const store = readHandoffs(workspaceFolder)
+  const allHandoffs = store.handoffs
+  const now = new Date().toISOString()
+  const chainId =
+    'CHAIN-' + now.slice(0, 10).replace(/-/g, '') + '-' + Math.random().toString(36).slice(2, 8)
+
+  const state = readStateFile(workspaceFolder) || {}
+  const currentAgent = canonicalAgentId(
+    state?.activeSession?.agent || state?.lastSession?.agent || 'user'
+  )
+
+  const chainHandoffs = selectedAgents.map((agent, index) => {
+    const dateStr = now.slice(0, 10).replace(/-/g, '')
+    const seq = String(allHandoffs.length + index + 1).padStart(3, '0')
+    const handoffId = 'HO-' + dateStr + '-' + seq
+
+    const isFirst = index === 0
+    const isLast = index === selectedAgents.length - 1
+    const nextAgent = isLast ? null : selectedAgents[index + 1]
+
+    return {
+      handoff_id: handoffId,
+      task_id: null,
+      from_agent: isFirst ? currentAgent : selectedAgents[index - 1].id,
+      to_agents: [],
+      owner_mode: 'auto',
+      status: isFirst ? 'queued' : 'blocked',
+      required_capabilities: mapAgentToCapabilities(agent),
+      summary: 'Pipeline step ' + (index + 1) + '/' + selectedAgents.length + ': ' + goal,
+      notes: 'Personality: ' + agent.name + ' (' + agent.category + ')',
+      no_handoff_reason: null,
+      files: [],
+      branch: runGit(workspaceFolder, ['rev-parse', '--abbrev-ref', 'HEAD']) || PLACEHOLDER,
+      commit: runGit(workspaceFolder, ['rev-parse', '--short', 'HEAD']) || PLACEHOLDER,
+      prior_attempts: 0,
+      agent_personality_id: agent.id,
+      chain_id: chainId,
+      chain_step: index + 1,
+      chain_total: selectedAgents.length,
+      next_chain_agent_id: nextAgent ? nextAgent.id : null,
+      created_at: now,
+      updated_at: now,
+      state_history: [
+        {
+          status: isFirst ? 'queued' : 'blocked',
+          agent: currentAgent,
+          timestamp: now,
+          reason: 'pipeline created'
+        }
+      ]
+    }
+  })
+
+  // Validate each handoff
+  for (const handoff of chainHandoffs) {
+    const { valid, errors } = validateHandoff(handoff)
+    if (!valid) {
+      vscode.window.showErrorMessage('AgentSync: Invalid pipeline handoff: ' + errors.join('; '))
+      return
+    }
+  }
+
+  const updatedHandoffs = [...allHandoffs, ...chainHandoffs]
+  writeHandoffs(workspaceFolder, { version: 1, handoffs: updatedHandoffs })
+  syncTrackerHandoffsSection(workspaceFolder)
+
+  vscode.window.showInformationMessage(
+    'AgentSync: Pipeline created with ' + selectedAgents.length + ' steps. Chain ID: ' + chainId
+  )
+}
+
+/**
+ * When a chain handoff is completed, auto-advance the next step.
+ * Call this after completeHandoffRecord.
+ * @param {vscode.WorkspaceFolder} workspaceFolder
+ * @param {string} completedHandoffId
+ */
+
 /**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
+  _extensionPath = context.extensionPath
   // â”€â”€ Status bar â”€â”€
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99)
   statusItem.command = 'agentsync.openDashboard'
   updateStatusBar(statusItem)
+
+  // ── Agent Catalog initialization ──
+  try {
+    const wsFolder = getActiveWorkspaceFolder()
+    loadAgentCatalog(wsFolder)
+  } catch {
+    // Non-fatal -- catalog will be loaded on first use
+  }
 
   const dashboardProvider = new AgentSyncDashboardViewProvider(context)
   const dashboardView = vscode.window.registerWebviewViewProvider(
@@ -5870,9 +3765,15 @@ function activate(context) {
   const agencyEventsWatcher = vscode.workspace.createFileSystemWatcher(
     '**/.agencysync/events/**/*.json'
   )
-  agencyEventsWatcher.onDidChange((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
-  agencyEventsWatcher.onDidCreate((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
-  agencyEventsWatcher.onDidDelete((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
+  agencyEventsWatcher.onDidChange((uri) =>
+    queueAgencySync(vscode.workspace.getWorkspaceFolder(uri))
+  )
+  agencyEventsWatcher.onDidCreate((uri) =>
+    queueAgencySync(vscode.workspace.getWorkspaceFolder(uri))
+  )
+  agencyEventsWatcher.onDidDelete((uri) =>
+    queueAgencySync(vscode.workspace.getWorkspaceFolder(uri))
+  )
 
   const agencyRunsWatcher = vscode.workspace.createFileSystemWatcher('**/.agencysync/runs.json')
   agencyRunsWatcher.onDidChange((uri) => queueAgencySync(vscode.workspace.getWorkspaceFolder(uri)))
@@ -5943,12 +3844,21 @@ function activate(context) {
     const opened = await openAgentSyncTutorial(context)
     if (!opened) {
       vscode.window.showWarningMessage(
-        'AgentSync: Could not open the interactive tutorial. Open "Getting Started" and select AgentSync.'
+        'AgentSync: Could not open the walkthrough. Open "Getting Started" and select AgentSync.'
       )
+    }
+  })
+  const openDocsCmd = vscode.commands.registerCommand('agentsync.openDocs', async () => {
+    const opened = await openAgentSyncDocs(context)
+    if (!opened) {
+      vscode.window.showWarningMessage('AgentSync: Could not open the documentation URL.')
     }
   })
   const openHandoffsCmd = vscode.commands.registerCommand('agentsync.openHandoffs', () =>
     openHandoffs()
+  )
+  const openConfigCmd = vscode.commands.registerCommand('agentsync.openConfig', () =>
+    openConfigFile()
   )
   const listHandoffsCmd = vscode.commands.registerCommand('agentsync.listHandoffs', () =>
     listHandoffsCommand()
@@ -5965,6 +3875,33 @@ function activate(context) {
   const syncAgencyRunsCmd = vscode.commands.registerCommand('agentsync.syncAgencyRuns', () =>
     syncAgencyRunsCommand()
   )
+  const syncAgentsCmd = vscode.commands.registerCommand('agentsync.syncAgents', async () => {
+    const workspaceFolder = await resolveWorkspaceFolder({ allowPick: true })
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage('AgentSync: No workspace folder is open.')
+      return
+    }
+    const root = workspaceFolder.uri.fsPath
+    const agentsDir = path.join(root, '.agents')
+    if (!fs.existsSync(agentsDir)) {
+      vscode.window.showInformationMessage('AgentSync: No .agents directory found to sync.')
+      return
+    }
+    const files = fs.readdirSync(agentsDir)
+    const mappings = files.map((f) => {
+      const lower = f.toLowerCase()
+      if (lower === 'copilot-instructions.md')
+        return { source: path.join('.agents', f), dest: path.join('.github', f) }
+      return { source: path.join('.agents', f), dest: f }
+    })
+    const results = require('./sync/linker').syncAgentFiles(root, mappings, {
+      allowWindowsBypass: true
+    })
+    const errors = results.filter((r) => r.action === 'error')
+    if (errors.length === 0) vscode.window.showInformationMessage('AgentSync: Sync complete.')
+    else
+      vscode.window.showWarningMessage(`AgentSync: Sync completed with ${errors.length} error(s).`)
+  })
   const clearActiveSessionCmd = vscode.commands.registerCommand(
     'agentsync.clearActiveSession',
     () => clearActiveSession()
@@ -6019,6 +3956,13 @@ function activate(context) {
 
     // Session duration
     let sessionDuration = 'No active session'
+    const sessionProvider = getSessionProviderInfo(
+      state?.activeSession || state?.lastSession || null
+    )
+    const sessionPersonality = getSessionPersonalityInfo(
+      workspaceFolder,
+      state?.activeSession || null
+    )
     if (state?.sessionActive && state?.activeSession?.startedAt) {
       const started = parseISODate(state.activeSession.startedAt)
       if (Number.isFinite(started)) {
@@ -6028,12 +3972,22 @@ function activate(context) {
 
     const lines = [
       `Session: ${state?.sessionActive ? 'Active (' + sessionDuration + ')' : 'Inactive'}`,
+      `Provider: ${sessionProvider.label || 'Unknown'}`,
+      `Personality: ${state?.sessionActive ? sessionPersonality.name : 'None'}`,
       `Hot files: ${hotFiles.length}`,
       `In-progress items: ${inProgressLines.length}`,
       `Open handoffs: ${openHandoffs}`,
       `Diff: ${filesChanged} file(s), +${insertions} -${deletions}`,
       `Estimated complexity: ${complexity}`
     ]
+
+    const missingHealthChecks = ['Build', 'Tests', 'Deploy'].filter((label) => {
+      const entry = state?.health?.[label]
+      return String(entry?.status ?? entry ?? 'Not configured') === 'Not configured'
+    })
+    if (missingHealthChecks.length > 0) {
+      lines.push(`Setup needed: ${missingHealthChecks.join(', ')} health checks are not configured`)
+    }
 
     if (state?.sessionMetrics) {
       lines.push(`Files modified this session: ${state.sessionMetrics.filesModified || 0}`)
@@ -6063,6 +4017,20 @@ function activate(context) {
   const refreshCmd = vscode.commands.registerCommand('agentsync.refreshPanel', () => {
     scheduleRefresh()
   })
+
+  // ── Agent Catalog commands ──
+  const browseAgentsCmd = vscode.commands.registerCommand('agentsync.browseAgents', () =>
+    browseAgentsCommand()
+  )
+  const runNextStepCmd = vscode.commands.registerCommand('agentsync.runNextStep', () =>
+    runNextStepCommand()
+  )
+  const runWithAgentCmd = vscode.commands.registerCommand('agentsync.runWithAgent', () =>
+    runWithAgentCommand()
+  )
+  const createPipelineCmd = vscode.commands.registerCommand('agentsync.createPipeline', () =>
+    createPipelineCommand()
+  )
 
   // â”€â”€ Startup automation â”€â”€
   setTimeout(() => checkSessionOnStartup(context), 3000)
@@ -6110,19 +4078,26 @@ function activate(context) {
     openDashboardCmd,
     openPanelCmd,
     openTutorialCmd,
+    openDocsCmd,
     openHandoffsCmd,
+    openConfigCmd,
     listHandoffsCmd,
     claimHandoffCmd,
     completeHandoffCmd,
     contextCapsuleCmd,
     syncAgencyRunsCmd,
+    syncAgentsCmd,
     clearActiveSessionCmd,
     startCmd,
     endCmd,
     detectCmd,
     contextStatusCmd,
     setRoleCmd,
-    refreshCmd
+    refreshCmd,
+    browseAgentsCmd,
+    runNextStepCmd,
+    runWithAgentCmd,
+    createPipelineCmd
   )
 }
 
@@ -6134,6 +4109,7 @@ module.exports = { activate, deactivate }
 // Jest sets NODE_ENV=test automatically; VS Code does not.
 if (process.env.NODE_ENV === 'test') {
   module.exports._testExports = {
+    initWorkspace,
     isEmptyValue,
     parseTracker,
     escapeRegExp,
@@ -6142,15 +4118,22 @@ if (process.env.NODE_ENV === 'test') {
     canonicalAgentId,
     parseISODate,
     parseCommandArgv,
+    resolveHealthCheckProgram,
     validateHandoff,
     getOperationalState,
     formatElapsed,
+    buildSessionIdentity,
+    getSessionProviderInfo,
+    getHandoffOwners,
     scoreNextTaskCapabilities,
     normalizeHandoffStatus,
     createHandoffRecord,
     claimHandoffRecord,
     completeHandoffRecord,
     listHandoffRecords,
+    startSessionCore: (ws, agent, goal, opts) =>
+      SessionManager.startSessionCore(ws, agent, goal, opts),
+    listRunnableQueuedHandoffs,
     syncAgencyRunsCore,
     generateContextCapsule,
     processDropZoneRequest

@@ -31,3 +31,7 @@ Ask the user to run `AgentSync: End Session` so the tracker is updated with:
 - Current Health checks
 - Hot Files from git changes
 - In Progress cleanup and Suggested Next Work
+
+## Agent Catalog
+
+AgentSync includes a catalog of 55+ agent personalities. Use `AgentSync: Browse Agent Catalog` to explore them, or `AgentSync: Run with Agent` for clipboard-ready prompts.
