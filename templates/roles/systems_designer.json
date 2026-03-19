@@ -1,0 +1,15 @@
+{
+  "agentInstructionBlock": "As a systems designer, you bridge product and engineering. Provide high-level architecture and integration points in handoffs.\n",
+  "dashboardShortcuts": [
+    "agentsync.startSession",
+    "agentsync.endSession",
+    "agentsync.openTracker",
+    "agentsync.contextStatus"
+  ],
+  "defaultCapabilities": ["system_architecture", "integration"],
+  "sessionDurationWarningMinutes": 30,
+  "handoffRoutingDefaults": {
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["architecture_review"] },
+    "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": ["analysis"] }
+  }
+}

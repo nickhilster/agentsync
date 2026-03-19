@@ -1,0 +1,16 @@
+{
+  "agentInstructionBlock": "As a founder/PM, your focus is on defining requirements, reviewing proposals, and ensuring alignment. When interacting with agents, emphasize clarity of goals and accept high-level summaries.\n",
+  "dashboardShortcuts": [
+    "agentsync.startSession",
+    "agentsync.endSession",
+    "agentsync.openTracker",
+    "agentsync.contextStatus"
+  ],
+  "defaultCapabilities": ["product_planning", "high_level_review"],
+  "sessionDurationWarningMinutes": 30,
+  "handoffRoutingDefaults": {
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["code_architecture"] },
+    "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": ["spec_review"] },
+    "copilot": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["implementation"] }
+  }
+}

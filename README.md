@@ -9,7 +9,7 @@ AgentSync is built for design and product teams using AI agents (Claude, Codex, 
 1. Install **AgentSync** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=Teambotics.agentsync).
 2. Run `AgentSync: Initialize Workspace`.
 3. Open `AgentSync: Open Live Dashboard`.
-4. (Optional) Run `AgentSync: Open Interactive Tutorial` for guided onboarding.
+4. (Optional) Run `AgentSync: Open Walkthrough` for guided onboarding.
 5. Start work with `AgentSync: Start Session`, then close with `AgentSync: End Session`.
 
 ## Why AgentSync
@@ -60,12 +60,12 @@ The **AgentSync Live** view includes:
 - failure recovery shortcuts (`Open Tracker`, `Refresh`)
 - handoff buckets (`Assigned to me`, `Shared with me`, `Blocked/Stale`)
 
-## Interactive Tutorial
+## Walkthrough
 
 Run:
 
 ```text
-AgentSync: Open Interactive Tutorial
+AgentSync: Open Walkthrough
 ```
 
 This opens a VS Code Getting Started walkthrough with clickable steps for:
@@ -136,6 +136,30 @@ Clicking the status item opens AgentSync Live.
 ### 4. Multi-root behavior
 
 In multi-root workspaces, AgentSync targets the active editor's workspace folder and labels status with the folder name.
+
+### 5. Advanced handoff and agency commands
+
+```text
+AgentSync: List Handoffs
+AgentSync: Claim Handoff
+AgentSync: Complete Handoff
+AgentSync: Generate Context Capsule
+AgentSync: Sync Agency Runs
+```
+
+These commands support:
+
+- explicit handoff lifecycle control from the command palette
+- deterministic context capsule output to `.agentsync/context-capsule.json`
+- ingesting `.agencysync/runs.json` and `.agencysync/events/**/*.json` into AgentSync handoffs
+
+Drop-zone API actions now include:
+
+- `listHandoffs`
+- `claimHandoff`
+- `completeHandoff`
+- `createHandoff`
+- `syncAgencyRuns`
 
 ## Optional Configuration
 

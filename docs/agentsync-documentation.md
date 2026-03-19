@@ -1,124 +1,87 @@
 # AgentSync Documentation
 
 ## Overview
-AgentSync is a VS Code extension that coordinates multi-agent work (Claude, Codex, Copilot) in a shared repository by standardizing handoff files and workflow commands.
 
-## Core Value
-- Prevents conflicting parallel agent work by maintaining a shared tracker (`AgentTracker.md`).
-- Provides consistent session lifecycle commands for starting and ending agent work.
-- Surfaces stale or branch-divergent handoff state via a status bar indicator.
+AgentSync coordinates multi-agent workflows (Claude, Codex, Copilot, and Agency-style pipelines) in a shared repository using local-first artifacts:
 
-## Repository Structure
-- `extension.js`: Main extension implementation and all command logic.
-- `package.json`: Extension manifest, command registrations, metadata.
-- `templates/`: Seed files copied into user workspaces during initialization.
-- `README.md`: End-user usage and workflow documentation.
-- `agentsync-0.2.0.vsix`: Packaged extension artifact.
+- `AgentTracker.md` (human handoff log)
+- `.agentsync/state.json` (session/runtime state)
+- `.agentsync/handoffs.json` (machine-readable handoffs)
+- `.agentsync/context-capsule.json` (deterministic context package)
 
-## Extension Commands
-- `AgentSync: Initialize Workspace` (`agentsync.init`)
-- `AgentSync: Open AgentTracker` (`agentsync.openTracker`)
-- `AgentSync: Start Session` (`agentsync.startSession`)
-- `AgentSync: End Session` (`agentsync.endSession`)
+## Command Surface
 
-## Runtime Behavior
-### Activation
-- Activates on `onStartupFinished`.
-- Creates a status bar item bound to `agentsync.openTracker`.
-- Watches `**/AgentTracker.md` and `**/.agentsync.json` for updates.
-- Handles multi-root by preferring active editor workspace and labeling status text with folder name.
+Primary commands:
 
-### Initialize Workspace
-- Copies templates into target repo:
-  - `CLAUDE.md`
-  - `AGENTS.md`
-  - `.github/copilot-instructions.md`
-  - `AgentTracker.md`
-  - `.agentsync.json`
-- Prompts before overwriting existing files.
+- `agentsync.init`
+- `agentsync.startSession`
+- `agentsync.endSession`
+- `agentsync.clearActiveSession`
+- `agentsync.openDashboard`
+- `agentsync.openHandoffs`
+- `agentsync.contextStatus`
 
-### Start Session
-- Ensures tracker exists (offers auto-initialize).
-- Prompts for agent and goal.
-- Appends an unchecked item into `## In Progress` with ISO timestamp.
+Handoff lifecycle commands:
 
-### End Session
-- Prompts for agent, summary, and optional suggested next work.
-- Collects git metadata:
-  - branch (`git rev-parse --abbrev-ref HEAD`)
-  - commit (`git rev-parse --short HEAD`)
-- Updates tracker sections:
-  - `Last Session`
-  - `Current Health`
-  - `Hot Files`
-  - `In Progress`
-  - `Suggested Next Work` (append-only when provided)
-- Runs optional build/test/deploy commands from `.agentsync.json`.
+- `agentsync.listHandoffs`
+- `agentsync.claimHandoff`
+- `agentsync.completeHandoff`
 
-## Configuration
-Path: `.agentsync.json`
+Agency/context commands:
 
-Supported keys:
-- `staleAfterHours` (number, default 24)
-- `commands.build`
-- `commands.test` (or `commands.tests`)
-- `commands.deploy`
+- `agentsync.contextCapsule`
+- `agentsync.syncAgencyRuns`
 
-If commands are missing or blank, health rows are marked `Not configured`.
+## Drop-zone API
 
-## Tracker Model (`AgentTracker.md`)
-Expected high-value sections:
-- Last Session (agent/date/summary/branch/commit)
-- Current Health (build/test/deploy)
-- Hot Files
-- In Progress
-- Suggested Next Work
-- Known Issues & Gotchas
-- Conventions
+Supported `.agentsync/request.json` actions:
 
-The parser relies on markdown heading names and bold-label lines for last-session fields.
+- `startSession`
+- `endSession`
+- `status`
+- `health`
+- `listHandoffs`
+- `claimHandoff`
+- `completeHandoff`
+- `createHandoff`
+- `syncAgencyRuns`
 
-## Git Integration
-AgentSync uses synchronous git calls:
-- `diff --name-only`
-- `diff --cached --name-only`
-- `ls-files --others --exclude-standard`
-- fallback: `show --pretty=format: --name-only HEAD`
-- stale/branch safety checks:
-  - `rev-parse`
-  - `merge-base --is-ancestor`
+Results are written to `.agentsync/result.json`.
 
-## Known Risks and Gaps
-- `extension.js` is monolithic; maintainability risk as scope expands.
-- Tracker parsing depends on specific markdown formatting patterns.
-- Shell command execution returns pass/fail only (stdout/stderr not persisted for diagnosis).
-- No automated tests currently present in repository.
-- Potential text encoding artifacts in source comments/strings should be normalized to UTF-8 clean output.
+## Runtime Model
 
-## Suggested Engineering Roadmap
-1. Split `extension.js` into modules (`tracker`, `git`, `statusbar`, `commands`).
-2. Add unit tests for parser/section replacement and workspace selection behavior.
-3. Add integration tests for command flows (start/end/init).
-4. Harden markdown parsing (more resilient to formatting drift).
-5. Add optional telemetry/logging for failed health checks and git command failures.
-6. Publish extension CI pipeline (lint/test/package/release).
+- Activation: `onStartupFinished`.
+- Uses coalesced/debounced refresh scheduling to avoid duplicate recompute bursts.
+- Uses snapshot caching for tracker/config/state/handoff reads.
+- Uses hot-file git caching with TTL + invalidation.
+- Watches:
+  - `**/AgentTracker.md`
+  - `**/.agentsync.json`
+  - `**/.agentsync/state.json`
+  - `**/.agentsync/handoffs.json`
+  - `**/.agentsync/request.json`
+  - `**/.agencysync/runs.json`
+  - `**/.agencysync/events/**/*.json`
 
-## Quick Operational Runbook
-1. Initialize workspace once per repository.
-2. Start session at beginning of agent work.
-3. Execute code changes and run checks.
-4. End session to refresh tracker and handoff metadata.
-5. Review status bar warnings before continuing new work.
+## State and Schema Notes
 
-## Notion Sync Payload (Ready-to-Paste)
-Recommended Notion page title:
-- `AgentSync - Technical Documentation`
+- `state.json` now records integration metadata including:
+  - `integration.lastAgencySyncAt`
+  - `integration.snapshot.version`
+  - `integration.snapshot.hash`
+- `handoffs.schema.json` includes provenance fields:
+  - `source_system`
+  - `source_run_id`
+  - `source_event_id`
+- Skip/no-handoff records are normalized to schema-compatible `owner_mode: "auto"` with `to_agents: []`.
 
-Recommended child pages:
-- `Architecture`
-- `Command and Workflow Reference`
-- `Configuration and Tracker Schema`
-- `Known Risks`
-- `Roadmap`
+## Testing
 
-This markdown file can be copied directly into Notion, or split into those child pages.
+- Jest test suite includes parser/utility coverage plus handoff lifecycle and drop-zone contract tests.
+- Coverage collection targets `src/**/*.js` and `scripts/**/*.js`.
+
+## Current Risks
+
+- `src/extension.js` remains large; further modular extraction is still recommended.
+- Markdown-based tracker parsing remains format-sensitive.
+- Agency ingest uses deterministic heuristic mapping; event schemas should be tightened over time.

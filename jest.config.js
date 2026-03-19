@@ -7,7 +7,7 @@ module.exports = {
   moduleNameMapper: {
     vscode: '<rootDir>/__mocks__/vscode.js'
   },
-  collectCoverageFrom: ['extension.js', 'scripts/**/*.js'],
+  collectCoverageFrom: ['src/**/*.js', 'scripts/**/*.js'],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov']
 }

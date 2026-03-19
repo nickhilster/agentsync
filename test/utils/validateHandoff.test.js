@@ -1,6 +1,6 @@
 'use strict'
 
-const { _testExports } = require('../../extension')
+const { _testExports } = require('../../src/extension')
 const { validateHandoff } = _testExports
 
 const VALID_HANDOFF = {
@@ -120,9 +120,21 @@ describe('validateHandoff', () => {
   test('accepts a valid non-empty no_handoff_reason string', () => {
     const result = validateHandoff({
       ...VALID_HANDOFF,
+      owner_mode: 'auto',
+      to_agents: [],
+      required_capabilities: ['skip-handoff'],
       no_handoff_reason: 'No handoff needed for this task'
     })
     expect(result.valid).toBe(true)
+  })
+
+  test('rejects skip/no_handoff with single owner mode', () => {
+    const result = validateHandoff({
+      ...VALID_HANDOFF,
+      no_handoff_reason: 'Skipping'
+    })
+    expect(result.valid).toBe(false)
+    expect(result.errors.some((e) => e.includes('owner_mode'))).toBe(true)
   })
 
   test('rejects unknown owner_mode', () => {

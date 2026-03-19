@@ -1,6 +1,6 @@
 'use strict'
 
-const { _testExports } = require('../../extension')
+const { _testExports } = require('../../src/extension')
 const { isEmptyValue } = _testExports
 
 describe('isEmptyValue', () => {

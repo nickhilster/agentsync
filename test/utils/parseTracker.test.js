@@ -1,6 +1,6 @@
 'use strict'
 
-const { _testExports } = require('../../extension')
+const { _testExports } = require('../../src/extension')
 const { parseTracker } = _testExports
 
 const SAMPLE_TRACKER = `# AgentTracker
