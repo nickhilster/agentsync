@@ -11,6 +11,6 @@
   "sessionDurationWarningMinutes": 90,
   "handoffRoutingDefaults": {
     "codex": { "owner_mode": "single", "to_agents": ["claude"], "required_capabilities": ["code_review"] },
-    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["architecture"], "required_capabilities": [] }
+    "claude": { "owner_mode": "single", "to_agents": ["codex"], "required_capabilities": ["architecture"] }
   }
 }

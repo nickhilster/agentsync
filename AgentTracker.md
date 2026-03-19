@@ -5,11 +5,16 @@
 
 ## Last Session
 
-- **Agent:** Codex
-- **Date:** 2026-03-08T20:43:37.0150703-04:00
-- **Summary:** Fixed Windows health-check spawning, cleaned tracker state, and ignored local runtime/test artifacts.
-- **Branch:** codex/release-0.3.7-readiness
-- **Commit:** 0d84836
+- **Agent:** Claude
+- **Date:** 2026-03-02T18:23:24.125Z
+- **Summary:** -
+- **Branch:** main
+- **Commit:** 0d68240
+
+- **Date:** 2026-02-22T00:00:00Z
+- **Summary:** Implemented AgentSync Live webview dashboard, handoff-aware details panel, stale-session controls, and local VSIX refresh workflow.
+- **Branch:** main
+- **Commit:** (see latest commit after EOD push)
 
 ## Current Health
 
